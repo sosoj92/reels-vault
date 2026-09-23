@@ -36,6 +36,13 @@ NB_IMAGES = 3
 YTDLP = [sys.executable, "-m", "yt_dlp"]
 GALLERYDL = [sys.executable, "-m", "gallery_dl"]
 
+# Contournement TikTok : certains appels yt-dlp échouent sans User-Agent explicite.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/143.0.0.0 Safari/537.36"
+)
+
 MOTIF_LIEN = re.compile(
     r"https?://(?:www\.|vm\.|vt\.)?(?:tiktok\.com|instagram\.com)/[^\s\"'<>,\)\]]+"
 )
@@ -59,7 +66,9 @@ def verifier_outils():
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
     except (OSError, subprocess.CalledProcessError):
-        manquants.append("ffmpeg  ->  winget install Gyan.FFmpeg  (puis rouvrir PowerShell)")
+        manquants.append(
+            "ffmpeg  ->  winget install Gyan.FFmpeg  (puis rouvrir PowerShell)"
+        )
 
     if manquants:
         log("ERREUR : outil(s) manquant(s)")
@@ -111,15 +120,36 @@ def identifiant(lien):
     return f"{plateforme}_{fin or str(abs(hash(lien)))[:10]}"
 
 
+def options_ytdlp(lien, cookies):
+    """Options communes à yt-dlp.
+
+    On force le User-Agent uniquement pour TikTok afin de ne pas modifier
+    inutilement le comportement d'Instagram.
+    """
+    options = []
+    if "tiktok.com" in lien:
+        options += ["--user-agent", USER_AGENT]
+    options += options_cookies(cookies)
+    return options
+
+
 # ---------------------------------------------------------------- étapes
 
 def recuperer_metadonnees(lien, cookies):
     commande = YTDLP + ["--dump-json", "--no-warnings", "--skip-download"]
-    commande += options_cookies(cookies)
+    commande += options_ytdlp(lien, cookies)
     commande.append(lien)
-    resultat = subprocess.run(commande, capture_output=True, text=True, timeout=120)
+
+    resultat = subprocess.run(
+        commande,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
     if resultat.returncode != 0:
         raise RuntimeError((resultat.stderr or "yt-dlp a échoué").strip()[:300])
+
     return json.loads(resultat.stdout.splitlines()[0])
 
 
@@ -128,20 +158,35 @@ def telecharger_media(lien, dossier, nom, cookies):
     audio = dossier / f"{nom}.m4a"
     video = dossier / f"{nom}.mp4"
 
-    base = YTDLP + ["--no-warnings", "--quiet"] + options_cookies(cookies)
+    base = YTDLP + ["--no-warnings", "--quiet"]
+    base += options_ytdlp(lien, cookies)
 
     subprocess.run(
-        base + ["-f", "bestaudio", "-x", "--audio-format", "m4a",
-                "-o", str(dossier / f"{nom}.%(ext)s"), lien],
-        capture_output=True, timeout=300,
+        base + [
+            "-f", "bestaudio",
+            "-x",
+            "--audio-format", "m4a",
+            "-o", str(dossier / f"{nom}.%(ext)s"),
+            lien,
+        ],
+        capture_output=True,
+        timeout=300,
     )
+
     subprocess.run(
-        base + ["-f", "worstvideo[height>=480]/worst",
-                "-o", str(video), lien],
-        capture_output=True, timeout=300,
+        base + [
+            "-f", "worstvideo[height>=480]/worst",
+            "-o", str(video),
+            lien,
+        ],
+        capture_output=True,
+        timeout=300,
     )
-    return (audio if audio.exists() else None,
-            video if video.exists() else None)
+
+    return (
+        audio if audio.exists() else None,
+        video if video.exists() else None,
+    )
 
 
 def transcrire(audio, modele):
@@ -188,18 +233,26 @@ def extraire_images(video, dossier_images, nom, duree):
     """Prend NB_IMAGES captures réparties dans la vidéo."""
     if video is None or not duree:
         return []
+
     chemins = []
     for i in range(NB_IMAGES):
         instant = duree * (i + 1) / (NB_IMAGES + 1)
         sortie = dossier_images / f"{nom}_{i + 1}.jpg"
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{instant:.1f}",
-             "-i", str(video), "-frames:v", "1", "-vf", "scale=720:-1",
-             str(sortie)],
-            capture_output=True, timeout=90,
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-ss", f"{instant:.1f}",
+                "-i", str(video),
+                "-frames:v", "1",
+                "-vf", "scale=720:-1",
+                str(sortie),
+            ],
+            capture_output=True,
+            timeout=90,
         )
         if sortie.exists():
             chemins.append(sortie)
+
     return chemins
 
 
@@ -241,10 +294,17 @@ def main():
     parseur = argparse.ArgumentParser()
     parseur.add_argument("fichier", help="fichier contenant les liens")
     parseur.add_argument("--vault", default=str(VAULT))
-    parseur.add_argument("--cookies", default=None,
-                         help="navigateur pour les cookies (chrome, firefox, edge)")
-    parseur.add_argument("--limite", type=int, default=0,
-                         help="ne traiter que les N premières vidéos")
+    parseur.add_argument(
+        "--cookies",
+        default=None,
+        help="navigateur pour les cookies (chrome, firefox, edge)",
+    )
+    parseur.add_argument(
+        "--limite",
+        type=int,
+        default=0,
+        help="ne traiter que les N premières vidéos",
+    )
     parseur.add_argument("--modele", default=MODELE_WHISPER)
     args = parseur.parse_args()
 
@@ -263,7 +323,7 @@ def main():
     liens = extraire_liens(args.fichier)
     a_faire = [l for l in liens if journal.get(l, {}).get("statut") != "ok"]
     if args.limite:
-        a_faire = a_faire[: args.limite]
+        a_faire = a_faire[:args.limite]
 
     log(f"{len(liens)} liens trouvés, {len(a_faire)} à traiter.")
     if not a_faire:
@@ -271,12 +331,14 @@ def main():
 
     log(f"Chargement du modèle Whisper « {args.modele} » (long la 1re fois)...")
     from faster_whisper import WhisperModel
+
     modele = WhisperModel(args.modele, device="cpu", compute_type="int8")
 
     reussites = echecs = 0
     for numero, lien in enumerate(a_faire, 1):
         nom = identifiant(lien)
         log(f"[{numero}/{len(a_faire)}] {lien}")
+
         try:
             erreur_meta = ""
             try:
@@ -288,16 +350,28 @@ def main():
             audio = video = None
             if meta.get("duration"):
                 genre = "video"
-                audio, video = telecharger_media(lien, dossier_temp, nom,
-                                                 args.cookies)
+                audio, video = telecharger_media(
+                    lien,
+                    dossier_temp,
+                    nom,
+                    args.cookies,
+                )
                 transcription = transcrire(audio, modele)
-                images = extraire_images(video, dossier_images, nom,
-                                         meta.get("duration"))
+                images = extraire_images(
+                    video,
+                    dossier_images,
+                    nom,
+                    meta.get("duration"),
+                )
             else:
                 genre = "carrousel"
                 transcription = ""
-                images, legende = telecharger_carrousel(lien, dossier_images,
-                                                        nom, args.cookies)
+                images, legende = telecharger_carrousel(
+                    lien,
+                    dossier_images,
+                    nom,
+                    args.cookies,
+                )
                 if not images:
                     raise RuntimeError(
                         "ni vidéo ni image récupérée | yt-dlp : "
@@ -306,8 +380,16 @@ def main():
                 if legende and not meta.get("description"):
                     meta["description"] = legende
 
-            ecrire_fiche(dossier_raw, vault, nom, lien, meta, transcription,
-                         images, genre)
+            ecrire_fiche(
+                dossier_raw,
+                vault,
+                nom,
+                lien,
+                meta,
+                transcription,
+                images,
+                genre,
+            )
 
             for fichier in (audio, video):
                 if fichier and fichier.exists():
@@ -315,9 +397,13 @@ def main():
 
             journal[lien] = {"statut": "ok", "fiche": f"{nom}.md"}
             reussites += 1
+
         except Exception as erreur:  # noqa: BLE001 — on continue quoi qu'il arrive
             log(f"    échec : {erreur}")
-            journal[lien] = {"statut": "echec", "erreur": str(erreur)[:300]}
+            journal[lien] = {
+                "statut": "echec",
+                "erreur": str(erreur)[:300],
+            }
             echecs += 1
 
         sauver_journal(chemin_journal, journal)

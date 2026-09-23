@@ -1,0 +1,19 @@
+# Environnement Python
+.venv/
+__pycache__/
+*.pyc
+
+# Données personnelles du Vault
+raw/
+images/
+.temp/
+journal.json
+progression.txt
+index.md
+taxonomy.md
+vault.html
+test-liens.txt
+
+# Secrets / variables
+.env
+*.env
