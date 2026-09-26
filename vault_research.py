@@ -501,19 +501,32 @@ def save_finding(conn, entity, provider, finding):
     return cur.lastrowid, safe
 
 
-def research_queue_items(conn, provider, limit=5):
+def research_queue_items(conn, provider, limit=5, retry_unsafe=False):
     ensure_research_schema(conn)
 
     queue = resolution.research_queue(conn, limit=200)
-    researched_entity_ids = {
-        row[0]
-        for row in conn.execute(
-            """
+    if retry_unsafe:
+        researched_sql = """
+            SELECT DISTINCT entity_id
+              FROM intelligence_research_findings
+             WHERE provider = ?
+               AND (
+                    status IN ('ambiguous', 'not_found')
+                    OR (status = 'resolved' AND safe_to_apply = 1)
+               )
+        """
+    else:
+        researched_sql = """
             SELECT DISTINCT entity_id
               FROM intelligence_research_findings
              WHERE provider = ?
                AND status IN ('resolved', 'ambiguous', 'not_found')
-            """,
+        """
+
+    researched_entity_ids = {
+        row[0]
+        for row in conn.execute(
+            researched_sql,
             (provider.name,),
         ).fetchall()
     }
@@ -572,6 +585,9 @@ def research_queue_items(conn, provider, limit=5):
                     "safe_to_apply": False,
                 }
             )
+
+            if isinstance(exc, ResearchRateLimitError):
+                break
 
     return results
 
@@ -731,13 +747,23 @@ def main():
     action.add_argument("--apply-safe", action="store_true")
     action.add_argument("--summary", action="store_true")
     parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument(
+        "--retry-unsafe",
+        action="store_true",
+        help="recherche a nouveau les findings resolved mais non auto-applicables",
+    )
     args = parser.parse_args()
 
     conn = intelligence.connect(args.db)
     try:
         if args.research:
             provider = provider_from_name(args.provider)
-            result = research_queue_items(conn, provider, limit=args.limit)
+            result = research_queue_items(
+                conn,
+                provider,
+                limit=args.limit,
+                retry_unsafe=args.retry_unsafe,
+            )
         elif args.apply_safe:
             result = apply_safe_findings(conn, provider_name=args.provider)
         else:
