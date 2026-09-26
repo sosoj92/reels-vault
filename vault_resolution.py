@@ -414,6 +414,7 @@ def research_queue(conn, limit=50):
             SELECT COUNT(DISTINCT source_id)
               FROM intelligence_entity_sources
              WHERE entity_id = ?
+               AND role <> 'primary'
             """,
             (entity["id"],),
         ).fetchone()[0]
