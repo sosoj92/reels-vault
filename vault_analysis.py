@@ -27,7 +27,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,7 +38,8 @@ from typing import Protocol
 
 import vault_intelligence as intelligence
 
-ANALYSIS_SCHEMA_VERSION = 1
+ANALYSIS_SCHEMA_VERSION = 2
+ANALYSIS_LOGIC_VERSION = "v2-grounded-relations"
 
 ALLOWED_RELATION_PREDICATES = {
     "uses",
@@ -73,6 +76,7 @@ CREATE TABLE IF NOT EXISTS intelligence_source_analysis (
     summary            TEXT,
     raw_result         TEXT NOT NULL DEFAULT '{}',
     rejected_items     TEXT NOT NULL DEFAULT '[]',
+    superseded_at      TEXT,
     created_at         TEXT NOT NULL,
     UNIQUE (source_id, source_fingerprint, provider, model)
 );
@@ -120,6 +124,18 @@ class AnalysisProvider(Protocol):
 def ensure_analysis_schema(conn):
     intelligence.ensure_schema(conn)
     conn.executescript(ANALYSIS_SCHEMA)
+
+    columns = {
+        row[1]
+        for row in conn.execute(
+            "PRAGMA table_info(intelligence_source_analysis)"
+        ).fetchall()
+    }
+    if "superseded_at" not in columns:
+        conn.execute(
+            "ALTER TABLE intelligence_source_analysis "
+            "ADD COLUMN superseded_at TEXT"
+        )
     conn.execute(
         "INSERT INTO meta(key, value) VALUES ('analysis_schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -233,6 +249,7 @@ def source_payload(conn, source_id, max_chars=None):
 
 def source_fingerprint(payload):
     stable = {
+        "analysis_logic_version": ANALYSIS_LOGIC_VERSION,
         "source_id": payload["source_id"],
         "title": payload.get("title"),
         "description": payload.get("description"),
@@ -309,6 +326,15 @@ Rules:
 - Relations may ONLY connect two listed entity IDs.
 - Never create or infer a new entity, company, person, product, URL, repository, or ID.
 - Do not create a relation just because two entities appear in the same source.
+- A relation means the SUBJECT itself has that relationship to the OBJECT.
+- IMPORTANT: if a directory/platform X lists alternatives to product Y, that does
+  NOT mean X is alternative_to Y.
+- Example: "OpenAlternative lists alternatives to Notion" must NOT produce
+  OpenAlternative alternative_to Notion.
+- Only produce "Memos alternative_to Notion" if the supplied source explicitly
+  supports that Memos itself is an alternative to Notion.
+- Relation evidence MUST explicitly name BOTH the subject entity and object entity.
+  If you cannot quote evidence naming both, omit the relation.
 - Keep evidence short and directly grounded in the supplied text.
 - If there is no supported claim or relation, return an empty array.
 - Output JSON only.
@@ -332,12 +358,39 @@ def _parse_result_object(data):
     )
 
 
+def _fold_for_evidence(value):
+    value = unicodedata.normalize("NFD", value or "")
+    value = "".join(
+        char for char in value
+        if unicodedata.category(char) != "Mn"
+    ).lower()
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
+def _evidence_names_both_entities(evidence, subject_name, object_name):
+    folded_evidence = _fold_for_evidence(evidence)
+    if not folded_evidence:
+        return False
+    subject = _fold_for_evidence(subject_name)
+    object_value = _fold_for_evidence(object_name)
+    return bool(
+        subject
+        and object_value
+        and subject in folded_evidence
+        and object_value in folded_evidence
+    )
+
+
 def sanitize_result(payload, result):
     """
     Filtre tout item qui depasse le perimetre de la source.
     Les items rejetes sont conserves dans le journal d'analyse, mais jamais ecrits.
     """
-    allowed_ids = {entity["id"] for entity in payload.get("entities", [])}
+    entity_by_id = {
+        entity["id"]: entity
+        for entity in payload.get("entities", [])
+    }
+    allowed_ids = set(entity_by_id)
     claims = []
     relations = []
     rejected = []
@@ -414,12 +467,29 @@ def sanitize_result(payload, result):
             )
             continue
 
+        evidence = _clean_text(item.get("evidence"), max_len=500)
+        subject_name = entity_by_id[subject]["name"]
+        object_name = entity_by_id[object_id]["name"]
+        if not _evidence_names_both_entities(
+            evidence,
+            subject_name,
+            object_name,
+        ):
+            rejected.append(
+                {
+                    "kind": "relation",
+                    "reason": "evidence_does_not_name_both_entities",
+                    "item": item,
+                }
+            )
+            continue
+
         relations.append(
             {
                 "subject_entity_id": subject,
                 "predicate": predicate,
                 "object_entity_id": object_id,
-                "evidence": _clean_text(item.get("evidence"), max_len=500),
+                "evidence": evidence,
             }
         )
 
@@ -908,7 +978,8 @@ def _insert_claim(conn, source_id, item, analysis_id, provider):
 def _insert_relation(conn, source_id, item, analysis_id, provider):
     notes = json.dumps(
         {
-            "extracted_by": provider.name,
+            "extracted_by": _execution_provider_name(provider),
+            "analysis_model": _execution_model_name(provider),
             "analysis_id": analysis_id,
             "evidence": item.get("evidence"),
         },
@@ -950,6 +1021,133 @@ def _insert_relation(conn, source_id, item, analysis_id, provider):
         ),
     ).fetchone()
     return row[0]
+
+
+def _supersede_previous_analysis_artifacts(
+    conn,
+    *,
+    source_id,
+    provider_name,
+    model,
+    keep_analysis_id,
+):
+    """
+    Retire du graphe actif les artefacts automatiques des anciennes analyses
+    de la meme source/provider/model, tout en conservant leur raw_result.
+    """
+    previous_ids = [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT id
+              FROM intelligence_source_analysis
+             WHERE source_id = ?
+               AND provider = ?
+               AND COALESCE(model, '') = COALESCE(?, '')
+               AND id <> ?
+               AND superseded_at IS NULL
+            """,
+            (source_id, provider_name, model, keep_analysis_id),
+        ).fetchall()
+    ]
+    if not previous_ids:
+        return
+
+    placeholders = ",".join("?" for _ in previous_ids)
+
+    claim_ids = [
+        row[0]
+        for row in conn.execute(
+            f"""
+            SELECT DISTINCT claim_id
+              FROM intelligence_analysis_claim_links
+             WHERE analysis_id IN ({placeholders})
+            """,
+            previous_ids,
+        ).fetchall()
+    ]
+    relation_ids = [
+        row[0]
+        for row in conn.execute(
+            f"""
+            SELECT DISTINCT relation_id
+              FROM intelligence_analysis_relation_links
+             WHERE analysis_id IN ({placeholders})
+            """,
+            previous_ids,
+        ).fetchall()
+    ]
+
+    conn.execute(
+        f"""
+        UPDATE intelligence_source_analysis
+           SET superseded_at = ?
+         WHERE id IN ({placeholders})
+        """,
+        [intelligence.now(), *previous_ids],
+    )
+    conn.execute(
+        f"""
+        DELETE FROM intelligence_analysis_claim_links
+         WHERE analysis_id IN ({placeholders})
+        """,
+        previous_ids,
+    )
+    conn.execute(
+        f"""
+        DELETE FROM intelligence_analysis_relation_links
+         WHERE analysis_id IN ({placeholders})
+        """,
+        previous_ids,
+    )
+
+    for claim_id in claim_ids:
+        linked = conn.execute(
+            """
+            SELECT 1
+              FROM intelligence_analysis_claim_links
+             WHERE claim_id = ?
+             LIMIT 1
+            """,
+            (claim_id,),
+        ).fetchone()
+        row = conn.execute(
+            "SELECT notes FROM intelligence_claims WHERE id = ?",
+            (claim_id,),
+        ).fetchone()
+        if (
+            not linked
+            and row
+            and '"analysis_id"' in (row[0] or "")
+        ):
+            conn.execute(
+                "DELETE FROM intelligence_claims WHERE id = ?",
+                (claim_id,),
+            )
+
+    for relation_id in relation_ids:
+        linked = conn.execute(
+            """
+            SELECT 1
+              FROM intelligence_analysis_relation_links
+             WHERE relation_id = ?
+             LIMIT 1
+            """,
+            (relation_id,),
+        ).fetchone()
+        row = conn.execute(
+            "SELECT notes FROM intelligence_relations WHERE id = ?",
+            (relation_id,),
+        ).fetchone()
+        if (
+            not linked
+            and row
+            and '"analysis_id"' in (row[0] or "")
+        ):
+            conn.execute(
+                "DELETE FROM intelligence_relations WHERE id = ?",
+                (relation_id,),
+            )
 
 
 def analyze_source(conn, source_id, provider):
@@ -1014,6 +1212,14 @@ def analyze_source(conn, source_id, provider):
             ),
         )
         analysis_id = cur.lastrowid
+
+        _supersede_previous_analysis_artifacts(
+            conn,
+            source_id=source_id,
+            provider_name=provider.name,
+            model=getattr(provider, "model", None),
+            keep_analysis_id=analysis_id,
+        )
 
         claim_ids = []
         for item in clean_result.claims:
