@@ -168,8 +168,9 @@ def resource_identity(resource):
         }
 
     identity_group = NAME_IDENTITY_GROUPS.get(entity_type, "other")
+    provisional_type = "solution" if identity_group == "solution" else entity_type
     return {
-        "entity_type": entity_type,
+        "entity_type": provisional_type,
         "canonical_key": f"named:{identity_group}:{_slug(name)}",
         "name": name,
         "url": None,
@@ -276,9 +277,10 @@ def promote_resource(conn, *, resource, source_id):
     resource_id = resource["id"]
     identity = resource_identity(resource)
 
+    # La correspondance V2 -> V3 vit dans intelligence_resource_links.
+    # On n'enregistre pas un unique legacy_resource_id/type dans l'entite :
+    # une meme entite peut provenir de nombreuses ressources V2.
     metadata = {
-        "legacy_resource_id": resource_id,
-        "legacy_resource_type": resource.get("type"),
         "identity_basis": identity["identity_basis"],
         "needs_review": identity["needs_review"],
     }
