@@ -240,6 +240,20 @@ class SourceAnalysisTests(unittest.TestCase):
             details["relations"][0]["evidence"],
         )
 
+    def test_uncertainty_symbol_does_not_match_every_claim(self):
+        self.assertFalse(
+            analysis._contains_any(
+                "This is a certain factual statement.",
+                analysis.UNCERTAINTY_CUES,
+            )
+        )
+        self.assertTrue(
+            analysis._contains_any(
+                "The reduction is ~95%.",
+                analysis.UNCERTAINTY_CUES,
+            )
+        )
+
     def test_claim_rejects_invented_requirement(self):
         source_id, notion, _ = self._source()
 
