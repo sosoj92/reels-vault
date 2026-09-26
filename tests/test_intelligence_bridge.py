@@ -192,7 +192,7 @@ class IntelligenceBridgeTests(unittest.TestCase):
         notion = self.conn.execute(
             """
             SELECT * FROM intelligence_entities
-             WHERE canonical_key = 'named:tool:notion'
+             WHERE canonical_key = 'named:solution:notion'
             """
         ).fetchone()
 
@@ -201,7 +201,7 @@ class IntelligenceBridgeTests(unittest.TestCase):
             self.conn.execute(
                 """
                 SELECT COUNT(*) FROM intelligence_entities
-                 WHERE canonical_key = 'named:tool:notion'
+                 WHERE canonical_key = 'named:solution:notion'
                 """
             ).fetchone()[0],
             1,
@@ -218,6 +218,40 @@ class IntelligenceBridgeTests(unittest.TestCase):
             2,
         )
         self.assertTrue(json.loads(notion["metadata"])["needs_review"])
+
+    def test_tool_and_software_labels_converge_for_same_name(self):
+        self._insert_content_one()
+        bridge.promote_content(self.conn, 1)
+
+        self.conn.execute(
+            """
+            INSERT INTO contents(
+                id, source_url, platform, content_type, author, title,
+                category, ingested_at, created_at
+            ) VALUES (3, ?, 'Instagram', 'post', 'other', 'Third',
+                      'Business', '2026-09-26', '2026-09-26')
+            """,
+            ("https://www.instagram.com/p/def",),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO resources(id, content_id, name, url, type, description)
+            VALUES (30, 3, 'Notion', NULL, 'application', 'Troisieme mention')
+            """
+        )
+        self.conn.commit()
+
+        bridge.promote_content(self.conn, 3)
+
+        self.assertEqual(
+            self.conn.execute(
+                """
+                SELECT COUNT(*) FROM intelligence_entities
+                 WHERE canonical_key = 'named:solution:notion'
+                """
+            ).fetchone()[0],
+            1,
+        )
 
     def test_text_cannot_invent_a_github_repo(self):
         resource = {
