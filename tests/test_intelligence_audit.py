@@ -40,16 +40,32 @@ class IntelligenceAuditTests(unittest.TestCase):
         )
         vi.link_entity_source(self.conn, entity_id=entity, source_id=s1)
         vi.link_entity_source(self.conn, entity_id=entity, source_id=s2)
+        primary = vi.upsert_source(
+            self.conn,
+            source_url="https://www.notion.so/",
+            platform="web",
+            source_type="primary_identity_source",
+        )
+        vi.link_entity_source(
+            self.conn,
+            entity_id=entity,
+            source_id=primary,
+            role="primary",
+        )
 
         result = audit.audit(self.conn, top=5)
 
-        self.assertEqual(result["sources"], 2)
+        self.assertEqual(result["sources"], 3)
         self.assertEqual(result["entities"], 1)
         self.assertEqual(result["needs_review"], 1)
         self.assertEqual(result["reused_entities"], 1)
         self.assertEqual(
             result["top_reused_entities"][0]["canonical_key"],
             "named:solution:notion",
+        )
+        self.assertEqual(
+            result["top_reused_entities"][0]["source_count"],
+            2,
         )
 
 
