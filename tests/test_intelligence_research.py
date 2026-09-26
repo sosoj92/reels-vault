@@ -16,6 +16,14 @@ class FakeProvider:
         return self.findings.pop(0)
 
 
+class RateLimitedProvider:
+    name = "rate-limited"
+    model = "fake-model"
+
+    def research_identity(self, item):
+        raise research.ResearchRateLimitError("rate limit")
+
+
 class ResearchWorkerTests(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -230,6 +238,86 @@ class ResearchWorkerTests(unittest.TestCase):
                 (entity_id,),
             ).fetchone()
         )
+
+    def test_retry_unsafe_allows_researching_an_unsafe_resolved_finding_again(self):
+        entity_id = self._provisional("Claude Code")
+        self._link_resource(entity_id, 1, "Claude Code")
+
+        first = FakeProvider(
+            [
+                research.ResearchFinding(
+                    status="resolved",
+                    canonical_name="Claude Code",
+                    canonical_url="https://claude.com/product/claude-code",
+                    entity_type="software",
+                    primary_source_url="https://github.com/anthropics/claude-code",
+                    aliases=["Claude Code"],
+                )
+            ]
+        )
+        initial = research.research_queue_items(
+            self.conn,
+            first,
+            limit=1,
+        )
+        self.assertFalse(initial[0]["safe_to_apply"])
+
+        second = FakeProvider(
+            [
+                research.ResearchFinding(
+                    status="resolved",
+                    canonical_name="Claude Code",
+                    canonical_url="https://claude.com/product/claude-code",
+                    entity_type="software",
+                    primary_source_url="https://claude.com/product/claude-code",
+                    aliases=["Claude Code"],
+                )
+            ]
+        )
+
+        skipped = research.research_queue_items(
+            self.conn,
+            second,
+            limit=1,
+            retry_unsafe=False,
+        )
+        self.assertEqual(skipped, [])
+
+        retried = research.research_queue_items(
+            self.conn,
+            second,
+            limit=1,
+            retry_unsafe=True,
+        )
+        self.assertEqual(len(retried), 1)
+        self.assertTrue(retried[0]["safe_to_apply"])
+
+    def test_persistent_rate_limit_stops_batch_after_first_error(self):
+        one = self._provisional("One")
+        two = self._provisional("Two")
+        self._link_resource(one, 1, "One")
+        self._link_resource(two, 2, "Two")
+
+        results = research.research_queue_items(
+            self.conn,
+            RateLimitedProvider(),
+            limit=2,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "error")
+
+    def test_prompt_requests_same_host_primary_evidence_when_available(self):
+        prompt = research.build_identity_prompt(
+            {
+                "name": "Claude Code",
+                "entity_type": "solution",
+                "resource_names": ["Claude Code"],
+                "source_count": 4,
+            }
+        )
+        self.assertIn("SAME HOSTNAME", prompt)
+        self.assertIn("Do not use a GitHub repository", prompt)
 
     def test_provider_response_parser_handles_nested_assistant_message(self):
         payload = {
