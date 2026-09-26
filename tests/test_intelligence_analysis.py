@@ -254,6 +254,73 @@ class SourceAnalysisTests(unittest.TestCase):
             )
         )
 
+    def test_uncertainty_cues_use_token_boundaries(self):
+        self.assertFalse(
+            analysis._contains_any(
+                "This claim is factual.",
+                analysis.UNCERTAINTY_CUES,
+            )
+        )
+        self.assertTrue(
+            analysis._contains_any(
+                "This aims to improve quality.",
+                analysis.UNCERTAINTY_CUES,
+            )
+        )
+
+    def test_summary_rejects_strengthened_uncertainty(self):
+        source_id, _, _ = self._source()
+        self.conn.execute(
+            "UPDATE contents SET transcript = ? WHERE id = 1",
+            ("The feature vise à passer 5 détecteurs d'IA.",),
+        )
+        self.conn.commit()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="The feature passes five AI detectors.",
+                claims=[],
+                relations=[],
+            )
+        )
+
+        result = analysis.analyze_source(self.conn, source_id, provider)
+
+        self.assertIsNone(result["summary"])
+        self.assertEqual(result["rejected_items"], 1)
+        stored = self.conn.execute(
+            "SELECT rejected_items FROM intelligence_source_analysis"
+        ).fetchone()
+        rejected = json.loads(stored[0])
+        self.assertEqual(rejected[0]["kind"], "summary")
+        self.assertEqual(
+            rejected[0]["reason"],
+            "summary_uncertainty_strengthened",
+        )
+
+    def test_summary_keeps_matching_uncertainty(self):
+        source_id, _, _ = self._source()
+        self.conn.execute(
+            "UPDATE contents SET transcript = ? WHERE id = 1",
+            ("The feature vise à passer 5 détecteurs d'IA.",),
+        )
+        self.conn.commit()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="The feature aims to pass five AI detectors.",
+                claims=[],
+                relations=[],
+            )
+        )
+
+        result = analysis.analyze_source(self.conn, source_id, provider)
+
+        self.assertEqual(
+            result["summary"],
+            "The feature aims to pass five AI detectors.",
+        )
+
     def test_claim_rejects_invented_requirement(self):
         source_id, notion, _ = self._source()
 
