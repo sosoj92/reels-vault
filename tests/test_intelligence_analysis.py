@@ -268,48 +268,26 @@ class SourceAnalysisTests(unittest.TestCase):
             )
         )
 
-    def test_summary_rejects_strengthened_uncertainty(self):
-        source_id, _, _ = self._source()
-        self.conn.execute(
-            "UPDATE contents SET transcript = ? WHERE id = 1",
-            ("The feature vise à passer 5 détecteurs d'IA.",),
-        )
-        self.conn.commit()
+    def test_active_summary_is_built_from_grounded_claims(self):
+        source_id, notion, _ = self._source()
 
         provider = FakeAnalysisProvider(
             analysis.AnalysisResult(
-                summary="The feature passes five AI detectors.",
-                claims=[],
-                relations=[],
-            )
-        )
-
-        result = analysis.analyze_source(self.conn, source_id, provider)
-
-        self.assertIsNone(result["summary"])
-        self.assertEqual(result["rejected_items"], 1)
-        stored = self.conn.execute(
-            "SELECT rejected_items FROM intelligence_source_analysis"
-        ).fetchone()
-        rejected = json.loads(stored[0])
-        self.assertEqual(rejected[0]["kind"], "summary")
-        self.assertEqual(
-            rejected[0]["reason"],
-            "summary_uncertainty_strengthened",
-        )
-
-    def test_summary_keeps_matching_uncertainty(self):
-        source_id, _, _ = self._source()
-        self.conn.execute(
-            "UPDATE contents SET transcript = ? WHERE id = 1",
-            ("The feature vise à passer 5 détecteurs d'IA.",),
-        )
-        self.conn.commit()
-
-        provider = FakeAnalysisProvider(
-            analysis.AnalysisResult(
-                summary="The feature aims to pass five AI detectors.",
-                claims=[],
+                summary="A free-form provider summary that is not trusted directly.",
+                claims=[
+                    {
+                        "entity_id": notion,
+                        "claim_type": "fact",
+                        "claim_text": "Notion is described in the source",
+                        "evidence": "The creator recommends Notion.",
+                    },
+                    {
+                        "entity_id": notion,
+                        "claim_type": "recommendation",
+                        "claim_text": "The creator recommends Notion",
+                        "evidence": "The creator recommends Notion.",
+                    },
+                ],
                 relations=[],
             )
         )
@@ -318,7 +296,78 @@ class SourceAnalysisTests(unittest.TestCase):
 
         self.assertEqual(
             result["summary"],
-            "The feature aims to pass five AI detectors.",
+            "Notion is described in the source. The creator recommends Notion.",
+        )
+        stored = self.conn.execute(
+            "SELECT raw_result FROM intelligence_source_analysis"
+        ).fetchone()
+        raw = json.loads(stored[0])
+        self.assertEqual(
+            raw["summary"],
+            "A free-form provider summary that is not trusted directly.",
+        )
+
+    def test_active_summary_omits_rejected_claims(self):
+        source_id, notion, _ = self._source()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="The feature passes five detectors.",
+                claims=[
+                    {
+                        "entity_id": notion,
+                        "claim_type": "capability",
+                        "claim_text": "Notion passes five AI detectors.",
+                        "evidence": "Notion vise à passer 5 détecteurs d'IA.",
+                    },
+                    {
+                        "entity_id": notion,
+                        "claim_type": "fact",
+                        "claim_text": "Notion is mentioned in the source.",
+                        "evidence": "The creator recommends Notion.",
+                    },
+                ],
+                relations=[],
+            )
+        )
+
+        result = analysis.analyze_source(self.conn, source_id, provider)
+
+        self.assertEqual(
+            result["summary"],
+            "Notion is mentioned in the source.",
+        )
+        self.assertEqual(result["claims_written"], 1)
+        self.assertEqual(result["rejected_items"], 1)
+
+    def test_without_does_not_justify_invented_requirement(self):
+        source_id, notion, _ = self._source()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="Demo",
+                claims=[
+                    {
+                        "entity_id": notion,
+                        "claim_type": "requirement",
+                        "claim_text": "Notion requires a 23-hour build.",
+                        "evidence": "The first 4.5 hours were run without the tool.",
+                    }
+                ],
+                relations=[],
+            )
+        )
+
+        result = analysis.analyze_source(self.conn, source_id, provider)
+
+        self.assertEqual(result["claims_written"], 0)
+        stored = self.conn.execute(
+            "SELECT rejected_items FROM intelligence_source_analysis"
+        ).fetchone()
+        rejected = json.loads(stored[0])
+        self.assertEqual(
+            rejected[0]["reason"],
+            "unsupported_requirement",
         )
 
     def test_claim_rejects_invented_requirement(self):
