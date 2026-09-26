@@ -197,6 +197,7 @@ class IntelligenceBridgeTests(unittest.TestCase):
         ).fetchone()
 
         self.assertIsNotNone(notion)
+        self.assertEqual(notion["entity_type"], "solution")
         self.assertEqual(
             self.conn.execute(
                 """
