@@ -190,6 +190,56 @@ class SourceAnalysisTests(unittest.TestCase):
         self.assertEqual(relation["object_entity_id"], github)
         self.assertEqual(relation["predicate"], "integrates_with")
 
+    def test_analysis_details_returns_names_evidence_and_status(self):
+        source_id, notion, github = self._source()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="Reviewable analysis.",
+                claims=[
+                    {
+                        "entity_id": notion,
+                        "claim_type": "recommendation",
+                        "claim_text": "The creator recommends Notion.",
+                        "evidence": "The creator recommends Notion.",
+                    }
+                ],
+                relations=[
+                    {
+                        "subject_entity_id": notion,
+                        "predicate": "integrates_with",
+                        "object_entity_id": github,
+                        "evidence": "Notion integrates with GitHub.",
+                    }
+                ],
+            )
+        )
+
+        created = analysis.analyze_source(self.conn, source_id, provider)
+        details = analysis.analysis_details(
+            self.conn,
+            created["analysis_id"],
+        )
+
+        self.assertEqual(details["summary"], "Reviewable analysis.")
+        self.assertEqual(details["claims"][0]["entity_name"], "Notion")
+        self.assertEqual(
+            details["claims"][0]["verification_status"],
+            "asserted",
+        )
+        self.assertEqual(
+            details["relations"][0]["subject_name"],
+            "Notion",
+        )
+        self.assertEqual(
+            details["relations"][0]["object_name"],
+            "GitHub",
+        )
+        self.assertIn(
+            "Notion integrates with GitHub",
+            details["relations"][0]["evidence"],
+        )
+
     def test_unlinked_entity_and_invalid_predicate_are_rejected(self):
         source_id, notion, github = self._source()
 
