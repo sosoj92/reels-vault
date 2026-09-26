@@ -40,7 +40,7 @@ from typing import Protocol
 import vault_intelligence as intelligence
 
 ANALYSIS_SCHEMA_VERSION = 2
-ANALYSIS_LOGIC_VERSION = "v3-grounded-claims-and-relations"
+ANALYSIS_LOGIC_VERSION = "v4-grounded-summaries-claims-relations"
 
 ALLOWED_RELATION_PREDICATES = {
     "uses",
@@ -297,7 +297,7 @@ ENTITIES ALREADY LINKED TO THIS SOURCE
 
 Return exactly one JSON object:
 {{
-  "summary": "2-5 sentence concrete summary" | null,
+  "summary": "2-5 sentence concrete summary that preserves uncertainty and modality" | null,
   "claims": [
     {{
       "entity_id": integer | null,
@@ -320,7 +320,8 @@ Return exactly one JSON object:
 }}
 
 Rules:
-- Claims are source assertions, NOT verified facts.
+- The summary and claims are source assertions, NOT verified facts.
+- The summary MUST preserve uncertainty, approximation, and modality from the source.
 - Extract only claims explicitly supported by the supplied text.
 - Preserve modality and uncertainty exactly. Never strengthen "aims to", "may",
   "might", "likely", "probably", "approximately", "~", "appears", "suggests",
@@ -440,7 +441,14 @@ def _contains_any(text, cues):
                 return True
             continue
         folded_cue = _fold_for_evidence(cue)
-        if folded_cue and folded_cue in folded:
+        if not folded_cue:
+            continue
+        pattern = (
+            r"(?<![a-z0-9])"
+            + re.escape(folded_cue)
+            + r"(?![a-z0-9])"
+        )
+        if re.search(pattern, folded):
             return True
     return False
 
@@ -464,6 +472,27 @@ def _claim_preserves_evidence_strength(claim_text, evidence):
     return True, None
 
 
+def _summary_preserves_source_uncertainty(summary, payload):
+    if not summary:
+        return True, None
+
+    source_text = "\n".join(
+        part
+        for part in (
+            payload.get("title"),
+            payload.get("description"),
+            payload.get("transcript"),
+        )
+        if part
+    )
+    source_uncertain = _contains_any(source_text, UNCERTAINTY_CUES)
+    summary_uncertain = _contains_any(summary, UNCERTAINTY_CUES)
+
+    if source_uncertain and not summary_uncertain:
+        return False, "summary_uncertainty_strengthened"
+    return True, None
+
+
 def sanitize_result(payload, result):
     """
     Filtre tout item qui depasse le perimetre de la source.
@@ -477,6 +506,21 @@ def sanitize_result(payload, result):
     claims = []
     relations = []
     rejected = []
+
+    summary = _clean_text(result.summary, max_len=3000)
+    summary_ok, summary_reason = _summary_preserves_source_uncertainty(
+        summary,
+        payload,
+    )
+    if not summary_ok:
+        rejected.append(
+            {
+                "kind": "summary",
+                "reason": summary_reason,
+                "item": {"summary": summary},
+            }
+        )
+        summary = None
 
     for item in result.claims:
         if not isinstance(item, dict):
@@ -591,7 +635,7 @@ def sanitize_result(payload, result):
         )
 
     return AnalysisResult(
-        summary=_clean_text(result.summary, max_len=3000),
+        summary=summary,
         claims=claims,
         relations=relations,
     ), rejected
