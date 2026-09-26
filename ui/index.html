@@ -1,0 +1,1231 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reels Vault</title>
+<style>
+:root {
+  --bg: #f6f5f2; --surface: #ffffff; --surface-2: #efede8; --surface-3: #e7e4dd; --text: #1d1c1a;
+  --muted: #6b6860; --faint: #9a968d; --border: #e2dfd8; --accent: #3b5bdb; --accent-soft: #e7ecfd;
+  --tiktok: #111111; --insta: #c13584; --tag: #f1efe9;
+  --ok: #2b8a3e; --ok-soft: #e3f4e6; --warn: #c46a00; --warn-soft: #fdf0dc; --danger: #c92a2a; --danger-soft: #fde7e7;
+  --p1: #c92a2a; --p2: #d9480f; --p3: #3b5bdb; --p4: #868e96;
+  --s-proposed: #868e96; --s-approved: #3b5bdb; --s-todo: #7048e8; --s-doing: #d9480f; --s-done: #2b8a3e;
+  --s-dismissed: #adb5bd; --s-archived: #495057;
+  --shadow: 0 1px 2px rgba(0,0,0,.05), 0 2px 8px rgba(0,0,0,.04);
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151517; --surface: #1e1e21; --surface-2: #26262a; --surface-3: #303036; --text: #ecebe8;
+    --muted: #9c9a94; --faint: #74726d; --border: #333338; --accent: #8ea4ff; --accent-soft: #252c47;
+    --tiktok: #e9e9e9; --insta: #e46bb0; --tag: #2a2a2e;
+    --ok: #69db7c; --ok-soft: #1f3324; --warn: #ffa94d; --warn-soft: #3a2a15; --danger: #ff8787; --danger-soft: #3b1f1f;
+    --p1: #ff8787; --p2: #ffa94d; --p3: #8ea4ff; --p4: #909296;
+    --s-proposed: #909296; --s-approved: #8ea4ff; --s-todo: #b197fc; --s-doing: #ffa94d; --s-done: #69db7c;
+    --s-dismissed: #5c5f66; --s-archived: #a6a7ab;
+    --shadow: 0 1px 2px rgba(0,0,0,.3);
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: var(--accent); }
+h1, h2, h3, h4 { margin: 0; line-height: 1.3; }
+
+/* ---------- structure ---------- */
+.app { display: grid; grid-template-columns: 232px 1fr; min-height: 100vh; }
+.sidebar { position: sticky; top: 0; height: 100vh; border-right: 1px solid var(--border);
+  background: var(--surface); padding: 18px 12px; display: flex; flex-direction: column; gap: 4px; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 10px 18px; }
+.brand-mark { width: 30px; height: 30px; border-radius: 8px; background: var(--text); color: var(--bg);
+  display: grid; place-items: center; font-weight: 800; font-size: 15px; }
+.brand h1 { font-size: 16px; }
+.brand small { display: block; color: var(--muted); font-size: 12px; }
+.nav-item { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: none;
+  padding: 8px 10px; border-radius: 8px; text-align: left; color: var(--muted); font-weight: 500; }
+.nav-item:hover { background: var(--surface-2); color: var(--text); }
+.nav-item.active { background: var(--accent-soft); color: var(--accent); }
+.nav-item svg { width: 18px; height: 18px; flex: none; }
+.nav-item .count { margin-left: auto; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.nav-item.active .count { color: inherit; }
+.sidebar-foot { margin-top: auto; padding: 10px; font-size: 12px; color: var(--faint); }
+.sidebar-foot a { color: inherit; }
+.main { min-width: 0; display: flex; flex-direction: column; }
+.topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 12px;
+  padding: 12px 24px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border); }
+.topbar h2 { font-size: 18px; margin-right: auto; }
+.content { padding: 24px; max-width: 1440px; width: 100%; }
+
+/* ---------- elements ---------- */
+.btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface);
+  padding: 6px 12px; border-radius: 8px; font-size: 13px; font-weight: 500; white-space: nowrap; }
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); color: #fff; }
+.btn.dark { background: var(--text); border-color: var(--text); color: var(--bg); }
+.btn.ghost { border-color: transparent; background: none; }
+.btn.danger:hover { border-color: var(--danger); color: var(--danger); }
+.btn.sm { padding: 3px 8px; font-size: 12px; }
+.btn[disabled] { opacity: .45; cursor: not-allowed; }
+.btn[disabled]:hover { border-color: var(--border); color: inherit; }
+.input, select.input, textarea.input { width: 100%; padding: 7px 10px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface); }
+.input:focus, textarea.input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+textarea.input { resize: vertical; min-height: 90px; line-height: 1.5; }
+.search { max-width: 380px; padding-left: 32px;
+  background: var(--surface) no-repeat 10px 50% / 14px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239a968d' stroke-width='2.5'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E"); }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.panel-h { display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; }
+.panel-h h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.panel-h .btn { margin-left: auto; }
+.panel-b { padding: 0 16px 14px; }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); font-size: 12px; }
+.empty { color: var(--faint); padding: 14px 0; font-size: 13px; }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+.chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border); background: var(--tag);
+  border-radius: 999px; padding: 1px 9px; font-size: 12px; white-space: nowrap; }
+button.chip:hover { border-color: var(--accent); }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip .x { border: 0; background: none; padding: 0 0 0 2px; color: inherit; opacity: .6; }
+.pill { display: inline-flex; align-items: center; gap: 4px; border-radius: 6px; padding: 1px 7px; font-size: 12px;
+  font-weight: 500; white-space: nowrap; }
+.pill.cat { background: var(--accent); color: #fff; }
+.pill.sub { background: var(--accent-soft); color: var(--accent); }
+.pill.soft { background: var(--surface-2); color: var(--muted); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.danger { background: var(--danger-soft); color: var(--danger); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.prio { font-weight: 700; font-size: 11px; padding: 1px 6px; border-radius: 5px; color: #fff; }
+.prio-1 { background: var(--p1); } .prio-2 { background: var(--p2); } .prio-3 { background: var(--p3); } .prio-4 { background: var(--p4); }
+.plat { font-weight: 600; font-size: 12px; }
+.plat.tiktok { color: var(--tiktok); } .plat.instagram { color: var(--insta); }
+.type-badge { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 5px; text-transform: lowercase; }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
+.list li:first-child { border-top: 0; }
+.list .t { display: block; max-width: 100%; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link { border: 0; background: none; padding: 0; color: var(--text); text-align: left; font-weight: 500; }
+.link:hover { color: var(--accent); text-decoration: underline; }
+.seg { display: inline-flex; background: var(--surface-2); padding: 3px; border-radius: 9px; gap: 2px; }
+.seg button { border: 0; background: none; padding: 5px 12px; border-radius: 7px; font-size: 13px; color: var(--muted); }
+.seg button.on { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
+.seg .n { font-size: 11px; color: var(--faint); margin-left: 3px; }
+table.tbl { width: 100%; border-collapse: collapse; }
+.tbl th { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 10px 12px;
+  border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.tbl tr:last-child td { border-bottom: 0; }
+.tbl tr:hover td { background: color-mix(in srgb, var(--surface-2) 50%, transparent); }
+.scroll-x { overflow-x: auto; }
+
+/* ---------- dashboard ---------- */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.kpi { text-align: left; border: 1px solid var(--border); background: var(--surface); border-radius: var(--radius);
+  padding: 14px 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 2px; }
+button.kpi:hover { border-color: var(--accent); }
+.kpi .v { font-size: 28px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.kpi .l { font-size: 12px; color: var(--muted); }
+.kpi .bar { height: 3px; border-radius: 2px; margin-top: 8px; background: var(--kc, var(--accent)); width: 28px; }
+.dash { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+.span-4 { grid-column: span 4; } .span-5 { grid-column: span 5; } .span-6 { grid-column: span 6; }
+.span-7 { grid-column: span 7; } .span-8 { grid-column: span 8; } .span-12 { grid-column: span 12; }
+.pipeline { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); margin: 4px 0 10px; }
+.pipeline span { display: block; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+
+/* ---------- bibliotheque ---------- */
+.lib { display: grid; grid-template-columns: 250px 1fr; gap: 20px; align-items: start; }
+.facets { position: sticky; top: 76px; max-height: calc(100vh - 96px); overflow: auto; display: flex; flex-direction: column; gap: 18px; }
+.facet h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+.fbtn { display: flex; justify-content: space-between; align-items: center; width: 100%; border: 0; background: none;
+  padding: 5px 8px; border-radius: 7px; text-align: left; }
+.fbtn:hover { background: var(--surface-2); }
+.fbtn.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.fbtn.sub { padding-left: 22px; font-size: 13px; }
+.fbtn[disabled] { opacity: .4; cursor: default; background: none; }
+.fbtn .n { font-size: 12px; color: var(--faint); }
+.fbtn.on .n { color: inherit; }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.lib-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 16px; }
+.ccard { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;
+  display: flex; flex-direction: column; box-shadow: var(--shadow); cursor: pointer; transition: border-color .15s, transform .15s; }
+.ccard:hover { border-color: var(--accent); transform: translateY(-1px); }
+.thumb { aspect-ratio: 16 / 9; background: var(--surface-2); position: relative; overflow: hidden; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; object-position: center 30%; display: block; }
+.thumb .ph { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 12px; }
+.thumb .plat-b { position: absolute; left: 10px; top: 10px; background: rgba(0,0,0,.72); color: #fff;
+  font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.thumb .unav { position: absolute; right: 10px; top: 10px; }
+.ccard-b { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.ccard h3 { font-size: 15px; }
+.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: var(--muted); font-size: 13px; }
+.ccard-f { display: flex; gap: 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border);
+  padding-top: 8px; margin-top: auto; }
+.ccard-f b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ---------- tiroir (fiche detaillee) ---------- */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,.25); z-index: 40; opacity: 0; pointer-events: none; transition: opacity .2s; }
+.scrim.open { opacity: 1; pointer-events: auto; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(640px, 100%); z-index: 41; background: var(--bg);
+  border-left: 1px solid var(--border); transform: translateX(100%); transition: transform .22s ease; display: flex; flex-direction: column; }
+.drawer.open { transform: none; }
+.drawer-h { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.drawer-b { overflow: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.sec { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.sec-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.sec-h h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.sec-h .right { margin-left: auto; display: flex; gap: 6px; }
+.title-big { font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+.banner { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px;
+  background: var(--warn-soft); color: var(--warn); font-weight: 500; font-size: 13px; }
+.desc { white-space: pre-wrap; }
+details.sub { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 10px; }
+details.sub summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details.sub .body { white-space: pre-wrap; font-size: 13px; padding: 8px 0 2px; color: var(--muted); }
+.shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+.shots a { display: block; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); aspect-ratio: 9/16; background: var(--surface-2); }
+.shots img { width: 100%; height: 100%; object-fit: cover; }
+.kv { display: grid; grid-template-columns: 110px 1fr; gap: 8px 12px; align-items: center; font-size: 13px; }
+.kv > span:nth-child(odd) { color: var(--muted); }
+.chipedit { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; border: 1px solid var(--border);
+  border-radius: 8px; padding: 5px; background: var(--surface); }
+.chipedit input { border: 0; outline: 0; background: none; flex: 1; min-width: 120px; padding: 2px 4px; }
+.note { border-left: 3px solid var(--accent); padding: 4px 10px; margin: 8px 0; }
+.note p { margin: 0 0 4px; white-space: pre-wrap; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.form-grid .full { grid-column: 1 / -1; }
+label.f { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; }
+
+/* ---------- actions ---------- */
+.board { display: grid; grid-template-columns: repeat(6, minmax(230px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: start; }
+.col { background: var(--surface-2); border-radius: var(--radius); padding: 10px; min-height: 180px; display: flex; flex-direction: column; gap: 8px; }
+.col.over { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.col-h { display: flex; align-items: center; gap: 8px; padding: 2px 4px 4px; font-weight: 600; font-size: 12px;
+  text-transform: uppercase; letter-spacing: .05em; }
+.col-h .n { margin-left: auto; color: var(--faint); font-weight: 500; }
+.acard { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 7px; cursor: grab; border-left: 3px solid var(--sc); }
+.acard.dragging { opacity: .45; }
+.acard .t { font-weight: 600; font-size: 13.5px; }
+.acard .meta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; font-size: 12px; color: var(--muted); }
+.acard .src { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acard .acts { display: flex; gap: 5px; flex-wrap: wrap; }
+.due.late { color: var(--danger); font-weight: 600; }
+.life { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 1px 9px; font-size: 12px;
+  font-weight: 600; background: color-mix(in srgb, var(--lc) 14%, transparent); color: var(--lc); white-space: nowrap; }
+.life-proposed { --lc: var(--s-proposed); } .life-approved { --lc: var(--s-approved); } .life-sent { --lc: var(--s-todo); }
+.life-completed { --lc: var(--s-done); } .life-ignored { --lc: var(--s-dismissed); } .life-archived { --lc: var(--s-archived); }
+.act-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--border); }
+.act-row:first-child { border-top: 0; }
+.act-row .top { display: flex; align-items: flex-start; gap: 8px; }
+.act-row .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.sent-ok { color: var(--ok); font-weight: 600; font-size: 12px; }
+.status-sel { border: 1px solid var(--border); border-radius: 7px; padding: 3px 6px; background: var(--surface); font-size: 12px; }
+
+/* ---------- review ---------- */
+.review-hero { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 18px 20px; margin-bottom: 16px; }
+.review-hero h3 { font-size: 16px; }
+.counts { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.stat .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .l { font-size: 12px; color: var(--muted); }
+.blocks { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.block { border-top: 3px solid var(--bc, var(--accent)); }
+.block .panel-h h3 { color: var(--text); }
+.block .ico { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; background: color-mix(in srgb, var(--bc) 14%, transparent); color: var(--bc); font-size: 14px; }
+.history li { cursor: pointer; }
+.history li:hover .t { color: var(--accent); }
+
+/* ---------- integrations ---------- */
+.int-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; margin-bottom: 26px; }
+.int { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.int-top { display: flex; align-items: center; gap: 10px; }
+.logo { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; font-weight: 800; color: #fff; font-size: 15px; flex: none; }
+.int h3 { font-size: 15px; }
+.int p { margin: 0; font-size: 13px; color: var(--muted); }
+.int .caps { display: flex; flex-wrap: wrap; gap: 4px; }
+.int .foot { display: flex; gap: 6px; margin-top: auto; padding-top: 6px; border-top: 1px solid var(--border); align-items: center; }
+.section-t { display: flex; align-items: baseline; gap: 10px; margin: 0 0 12px; }
+.section-t h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+
+/* ---------- menus, modale, toasts ---------- */
+.menu { position: fixed; z-index: 60; min-width: 230px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.14); padding: 6px; }
+.menu h5 { margin: 4px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+.menu button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none; text-align: left;
+  padding: 7px 8px; border-radius: 7px; }
+.menu button:hover:not([disabled]) { background: var(--surface-2); }
+.menu button[disabled] { color: var(--faint); cursor: not-allowed; }
+.menu button small { margin-left: auto; font-size: 11px; color: var(--faint); }
+.menu hr { border: 0; border-top: 1px solid var(--border); margin: 5px 0; }
+dialog { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text);
+  width: min(560px, calc(100% - 32px)); padding: 0; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+dialog::backdrop { background: rgba(0,0,0,.3); }
+.dlg-h { padding: 16px 20px 0; display: flex; align-items: center; }
+.dlg-h h3 { font-size: 16px; }
+.dlg-b { padding: 14px 20px; }
+.dlg-f { padding: 0 20px 16px; display: flex; justify-content: flex-end; gap: 8px; }
+.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 80; display: flex; flex-direction: column; gap: 8px; }
+.toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 10px; font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.2); max-width: 380px; }
+.toast.err { background: var(--danger); color: #fff; }
+.toast a { color: inherit; font-weight: 600; }
+.loading { color: var(--faint); padding: 40px; text-align: center; }
+.offline { max-width: 560px; margin: 60px auto; padding: 24px; }
+.offline code { background: var(--surface-2); padding: 2px 6px; border-radius: 5px; }
+
+/* ---------- responsive ---------- */
+@media (max-width: 1100px) {
+  .span-4, .span-5, .span-6, .span-7, .span-8 { grid-column: span 12; }
+}
+@media (max-width: 860px) {
+  .app { grid-template-columns: 1fr; }
+  .sidebar { position: sticky; top: 0; z-index: 30; height: auto; flex-direction: row; overflow-x: auto; padding: 8px;
+    border-right: 0; border-bottom: 1px solid var(--border); gap: 2px; }
+  .brand, .sidebar-foot { display: none; }
+  .nav-item { flex: none; width: auto; padding: 7px 10px; }
+  .nav-item .count { display: none; }
+  .topbar { position: static; padding: 12px 16px; flex-wrap: wrap; }
+  .content { padding: 16px; }
+  .lib { grid-template-columns: 1fr; }
+  .facets { position: static; max-height: none; }
+  .form-grid { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: 1fr; gap: 2px 0; }
+  .kv > span:nth-child(odd) { margin-top: 8px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar" id="sidebar">
+    <div class="brand"><div class="brand-mark">R</div><div><h1>Reels Vault</h1><small>Knowledge &amp; actions</small></div></div>
+  </nav>
+  <div class="main">
+    <header class="topbar">
+      <h2 id="view-title">Dashboard</h2>
+      <input id="global-search" class="input search" type="search" placeholder="Rechercher dans le Vault…" autocomplete="off">
+      <button class="btn dark" id="btn-export">Exporter / Synchroniser ▾</button>
+    </header>
+    <main class="content" id="view"><div class="loading">Chargement…</div></main>
+  </div>
+</div>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Fiche du contenu"></aside>
+<dialog id="dlg"></dialog>
+<div class="toasts" id="toasts"></div>
+
+<script>
+"use strict";
+// Reels Vault V2 : interface de l'API locale (vault_api.py). Toutes les donnees viennent
+// de vault.db via l'API ; aucune logique propre a un fournisseur externe ici : les
+// connecteurs sont decrits par GET /connectors et appeles via l'API (couche connectors/).
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fold = s => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
+const ICONS = {
+  dashboard: '<path d="M3 13h8V3H3zM13 21h8V11h-8zM3 21h8v-6H3zM13 3v6h8V3z"/>',
+  library: '<path d="M4 19.5V4.5A1.5 1.5 0 0 1 5.5 3H20v18H5.5A1.5 1.5 0 0 1 4 19.5zM4 19.5A1.5 1.5 0 0 1 5.5 18H20"/>',
+  resources: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/>',
+  actions: '<path d="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+  review: '<path d="M3 3v18h18M7 15l4-4 3 3 6-6"/>',
+  integrations: '<path d="M8 12h8M9 7H7a5 5 0 0 0 0 10h2M15 7h2a5 5 0 0 1 0 10h-2"/>',
+};
+const VIEWS = [
+  ["dashboard", "Dashboard"], ["library", "Bibliothèque"], ["resources", "Ressources"],
+  ["actions", "Actions"], ["review", "Review"], ["integrations", "Intégrations"],
+];
+const STATUS = {
+  proposed: "Proposé", approved: "Validé", todo: "À faire", doing: "En cours",
+  done: "Terminé", dismissed: "Ignoré", archived: "Archivé",
+};
+const BOARD = ["proposed", "approved", "todo", "doing", "done", "archived"];
+const LIFE = { proposed: "Proposée", approved: "Validée", sent: "Envoyée", completed: "Terminée", ignored: "Ignorée", archived: "Archivée" };
+const LIFE_FILTERS = [["", "Toutes"], ["proposed", "Proposées"], ["approved", "Validées"], ["sent", "Envoyées"], ["completed", "Terminées"], ["ignored", "Ignorées"]];
+const VALIDATED = ["approved", "todo", "doing"];
+const PRIO = { 1: "Urgent", 2: "Haute", 3: "Normale", 4: "Basse" };
+const TYPE_COLORS = ["#3b5bdb", "#0c8599", "#2b8a3e", "#e67700", "#c2255c", "#7048e8", "#5c940d", "#d9480f", "#1971c2", "#862e9c", "#495057"];
+const CAPS = {
+  export_vault: "Export du Vault", export_contents: "Export de contenus", send_content: "Contenus",
+  send_resource: "Ressources", send_action: "Actions", send_review: "Bilans", upload_file: "Fichiers",
+};
+const LOGO = { excel: "#1d6f42", csv: "#495057", google_sheets: "#0f9d58", google_drive: "#1a73e8", notion: "#111111",
+  davy: "#7048e8", clickup: "#7b68ee", trello: "#0079bf", google_tasks: "#1a73e8", todoist: "#e44332", airtable: "#f7a600" };
+
+const S = {
+  view: "dashboard", config: null, connectors: [], taskProvider: null, stats: null, contents: [],
+  lib: { q: "", platform: "", category: "", sub: "", tags: new Set(), ids: null },
+  act: { mode: "kanban", q: "", type: "", provider: "", showDismissed: false },
+  res: { q: "", type: "" },
+  reviewShown: null, drawerId: null, drawerEdit: {},
+};
+
+// ------------------------------------------------------------------ API
+async function api(path, opts = {}) {
+  const init = { method: opts.method || "GET", headers: { "Content-Type": "application/json" } };
+  if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
+  const r = await fetch(path, init);
+  const txt = await r.text();
+  let data = null;
+  try { data = txt ? JSON.parse(txt) : null; } catch { data = txt; }
+  if (!r.ok) {
+    let msg = data && data.detail !== undefined ? data.detail : r.statusText;
+    if (Array.isArray(msg)) msg = msg.map(m => (m.loc || []).slice(1).join(".") + " : " + m.msg).join(" ; ");
+    const e = new Error(msg); e.status = r.status; e.code = data && data.error; throw e;
+  }
+  return data;
+}
+function toast(html, err = false) {
+  const t = document.createElement("div");
+  t.className = "toast" + (err ? " err" : "");
+  t.innerHTML = html;
+  $("#toasts").appendChild(t);
+  setTimeout(() => t.remove(), err ? 7000 : 5000);
+}
+const fail = e => toast(esc(e.message || e), true);
+
+// ------------------------------------------------------------------ formats
+const fmtDate = s => {
+  if (!s) return "";
+  const d = new Date(s.length === 10 ? s + "T00:00:00" : s);
+  return isNaN(d) ? s : d.toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: "numeric" });
+};
+const fmtDateTime = s => {
+  if (!s) return "";
+  const d = new Date(s);
+  return isNaN(d) ? s : d.toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+};
+const platCls = p => fold(p).includes("insta") ? "instagram" : fold(p).includes("tiktok") ? "tiktok" : "";
+const plural = (n, s, p) => `${n} ${n > 1 ? (p || s + "s") : s}`;
+function typeColor(t) {
+  const types = (S.config && S.config.action_types) || [];
+  const i = types.indexOf(t);
+  let h = 0; for (const c of String(t)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return TYPE_COLORS[(i >= 0 ? i : h) % TYPE_COLORS.length];
+}
+const typeBadge = t => t ? `<span class="type-badge" style="background:${typeColor(t)}1f;color:${typeColor(t)}">${esc(t)}</span>` : "";
+const resTypeBadge = t => `<span class="pill soft">${esc(t || "autre")}</span>`;
+const prioBadge = p => p ? `<span class="prio prio-${p}" title="Priorité ${esc(PRIO[p])}">P${p}</span>` : "";
+const statusDot = s => `<span class="dot" style="background:var(--s-${s})"></span>`;
+const statusPill = s => `<span class="pill soft">${statusDot(s)} ${esc(STATUS[s] || s)}</span>`;
+const lifePill = l => `<span class="life life-${esc(l)}">${esc(LIFE[l] || l)}</span>`;
+// Libelle d'un connecteur a partir de son nom (generique : aucune reference a un fournisseur precis).
+const connLabel = name => ((S.connectors || []).find(c => c.name === name) || {}).label || name;
+// Boutons du cycle de vie d'une action : proposee -> validee -> envoyee -> terminee (ou ignoree).
+// L'envoi passe par POST /actions/{id}/send, qui utilise le gestionnaire configure (TASK_PROVIDER).
+function lifecycleControls(a) {
+  const tp = (S.config && S.config.task_provider_info) || {};
+  switch (a.lifecycle) {
+    case "proposed":
+      return `<button class="btn sm primary" data-act-do="${a.id}:approve">Valider</button>
+              <button class="btn sm" data-act-do="${a.id}:ignore">Ignorer</button>`;
+    case "approved":
+      if (!tp.name) return `<button class="btn sm" disabled title="Choisissez un gestionnaire de tâches dans Intégrations">Envoyer vers…</button>
+              <button class="btn sm ghost" data-nav="integrations">Choisir un gestionnaire</button>`;
+      if (!tp.configured) return `<button class="btn sm" disabled>Envoyer vers ${esc(tp.label)} — non configuré</button>`;
+      return `<button class="btn sm primary" data-act-send="${a.id}">Envoyer vers ${esc(tp.label)}</button>
+              <button class="btn sm ghost" data-act-do="${a.id}:ignore">Ignorer</button>`;
+    case "sent":
+      return `<span class="sent-ok">✓ Envoyée vers ${esc(connLabel(a.external_provider))}</span>
+              ${a.external_url ? `<a class="btn sm" href="${esc(safeHref(a.external_url))}" target="_blank" rel="noopener noreferrer">Ouvrir dans ${esc(connLabel(a.external_provider))} ↗</a>` : ""}
+              <button class="btn sm ghost" data-act-send="${a.id}" data-provider="${esc(a.external_provider)}" title="Mettre à jour la tâche existante (pas de doublon)">Mettre à jour</button>
+              <button class="btn sm ghost" data-act-do="${a.id}:complete">Terminer</button>`;
+    case "completed":
+      return `<span class="sent-ok">✓ Terminée</span>${a.external_url ? `<a class="btn sm ghost" href="${esc(safeHref(a.external_url))}" target="_blank" rel="noopener noreferrer">Ouvrir dans ${esc(connLabel(a.external_provider))} ↗</a>` : ""}`;
+    case "ignored":
+      return `<button class="btn sm ghost" data-act-status="${a.id}:proposed">Restaurer</button>`;
+    default:
+      return "";
+  }
+}
+function actionRow(a) {
+  return `<div class="act-row"><div class="top"><div class="grow"><div class="t" style="font-weight:600">${esc(a.title)}</div>
+      <div class="meta">${typeBadge(a.action_type)}${prioBadge(a.priority)}${a.due_date ? `<span class="${isLate(a.due_date) && ["proposed", "approved", "sent"].includes(a.lifecycle) ? "due late" : ""}">📅 ${fmtDate(a.due_date)}</span>` : ""}
+        ${a.proposed_by && a.proposed_by !== "user" ? `<span>proposée par ${esc(a.proposed_by)}</span>` : ""}</div></div>
+      ${lifePill(a.lifecycle)}<button class="btn sm ghost" data-edit-action="${a.id}" title="Modifier">✎</button></div>
+    <div class="ctl">${lifecycleControls(a)}</div></div>`;
+}
+const imgUrl = p => p && /^images\//.test(p) ? "/" + p.split("/").map(encodeURIComponent).join("/") : null;
+const isLate = d => d && d < new Date().toISOString().slice(0, 10);
+const icon = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
+const safeHref = u => /^https?:\/\//i.test(u || "") ? u : "#";
+
+// ------------------------------------------------------------------ navigation
+function renderNav() {
+  const st = S.stats || {};
+  const counts = {
+    library: st.contents, resources: st.resources_distinct,
+    actions: st.actions_proposed !== undefined ? st.actions_proposed + st.actions_validated : "",
+    review: st.new_since_last_review || "",
+  };
+  const items = VIEWS.map(([k, l]) => `<button class="nav-item${S.view === k ? " active" : ""}" data-nav="${k}">
+      ${icon(k)}<span>${l}</span><span class="count">${counts[k] ?? ""}</span></button>`).join("");
+  $("#sidebar").innerHTML = $(".brand", $("#sidebar")).outerHTML + items +
+    `<div class="sidebar-foot">vault.db · API locale<br><a href="/docs" target="_blank" rel="noopener">Documentation API</a></div>`;
+}
+function go(view) {
+  if (!VIEWS.some(v => v[0] === view)) view = "dashboard";
+  S.view = view;
+  if (location.hash !== "#" + view) history.replaceState(null, "", "#" + view);
+  $("#view-title").textContent = VIEWS.find(v => v[0] === view)[1];
+  renderNav();
+  render();
+}
+async function refreshStats() {
+  try { S.stats = await api("/stats"); renderNav(); } catch (e) { /* ignore */ }
+}
+async function render() {
+  const el = $("#view");
+  try {
+    const fn = { dashboard: viewDashboard, library: viewLibrary, resources: viewResources,
+                 actions: viewActions, review: viewReview, integrations: viewIntegrations }[S.view];
+    await fn(el);
+  } catch (e) {
+    el.innerHTML = `<div class="panel empty" style="padding:20px">Erreur : ${esc(e.message)}</div>`;
+  }
+}
+async function refreshAll() {
+  await refreshStats();
+  if (S.view === "library" || S.view === "dashboard") S.contents = [];
+  await render();
+  if (S.drawerId) openContent(S.drawerId, true);
+}
+
+// ------------------------------------------------------------------ DASHBOARD
+async function viewDashboard(el) {
+  const [st, recent, prio, res, noact, reviews] = await Promise.all([
+    api("/stats"), api("/contents/recent?limit=6"), api("/actions?status=approved,todo,doing&limit=8"),
+    api("/resources?limit=8"), api("/contents/without-action?limit=6"), api("/reviews"),
+  ]);
+  S.stats = st; renderNav();
+  const kpi = (v, l, nav, color) => `<button class="kpi" data-nav="${nav}" style="--kc:${color}">
+      <span class="v">${v}</span><span class="l">${l}</span><span class="bar"></span></button>`;
+  const bs = st.actions_by_status;
+  const tot = Object.values(bs).reduce((a, b) => a + b, 0);
+  const pipe = tot ? Object.entries(bs).filter(([, n]) => n).map(([s, n]) =>
+      `<span style="width:${n / tot * 100}%;background:var(--s-${s})" title="${esc(STATUS[s])} : ${n}"></span>`).join("") : "";
+  const last = reviews.items[0];
+  el.innerHTML = `
+    <div class="kpis">
+      ${kpi(st.contents, "Contenus sauvegardés", "library", "var(--accent)")}
+      ${kpi(st.resources_distinct, "Ressources détectées", "resources", "#0c8599")}
+      ${kpi(st.actions_proposed, "Actions proposées", "actions", "var(--s-proposed)")}
+      ${kpi(st.actions_validated, "Actions validées", "actions", "var(--s-approved)")}
+      ${kpi(st.actions_done, "Actions terminées", "actions", "var(--s-done)")}
+      ${kpi(st.contents_unexploited, "Contenus non exploités", "library", "var(--warn)")}
+      ${kpi(st.new_since_last_review, "Nouveaux depuis le dernier bilan", "review", "#c2255c")}
+    </div>
+    <div class="dash">
+      <section class="panel span-7"><div class="panel-h"><h3>Derniers contenus ajoutés</h3>
+        <button class="btn sm ghost" data-nav="library">Tout voir →</button></div>
+        <div class="panel-b"><ul class="list">${recent.items.map(c => `<li>
+          ${thumbMini(c)}<div class="grow"><button class="link t" data-open="${c.id}">${esc(c.title)}</button>
+          <div class="faint"><span class="plat ${platCls(c.platform)}">${esc(c.platform)}</span> · @${esc(c.author)} · ${fmtDate(c.ingested_at || c.created_at)}</div></div>
+          ${c.category ? `<span class="pill cat">${esc(c.category)}</span>` : ""}</li>`).join("") || `<li class="empty">Aucun contenu.</li>`}</ul></div></section>
+      <section class="panel span-5"><div class="panel-h"><h3>Actions prioritaires</h3>
+        <button class="btn sm ghost" data-nav="actions">Kanban →</button></div>
+        <div class="panel-b">
+          <div class="pipeline">${pipe}</div>
+          <div class="legend">${BOARD.concat("dismissed").filter(s => bs[s]).map(s => `<span>${statusDot(s)}${esc(STATUS[s])} ${bs[s]}</span>`).join("") || "Aucune action pour l'instant."}</div>
+          <ul class="list" style="margin-top:8px">${prio.items.map(a => `<li>${prioBadge(a.priority)}
+            <div class="grow"><div class="t">${esc(a.title)}</div><div class="faint">${esc(a.content_title || "")}${a.due_date ? ` · échéance ${fmtDate(a.due_date)}` : ""}</div></div>
+            ${statusPill(a.status)}</li>`).join("") || `<li class="empty">Aucune action validée en cours.</li>`}</ul></div></section>
+      <section class="panel span-4"><div class="panel-h"><h3>Ressources récemment découvertes</h3>
+        <button class="btn sm ghost" data-nav="resources">Tout voir →</button></div>
+        <div class="panel-b"><ul class="list">${res.items.map(r => `<li><div class="grow"><div class="t">${esc(r.name)}</div>
+          <div class="faint">${esc(r.content_title)}</div></div>${resTypeBadge(r.type)}</li>`).join("") || `<li class="empty">Aucune ressource.</li>`}</ul></div></section>
+      <section class="panel span-4"><div class="panel-h"><h3>Contenus encore sans action</h3></div>
+        <div class="panel-b"><ul class="list">${noact.items.map(c => `<li><div class="grow">
+          <button class="link t" data-open="${c.id}">${esc(c.title)}</button><div class="faint">${esc(c.category || "")}</div></div>
+          <button class="btn sm" data-new-action='${esc(JSON.stringify({ content_id: c.id }))}'>+ Action</button></li>`).join("") || `<li class="empty">Tous les contenus ont une action.</li>`}</ul></div></section>
+      <section class="panel span-4"><div class="panel-h"><h3>Dernier bilan</h3>
+        <button class="btn sm ghost" data-nav="review">Review →</button></div>
+        <div class="panel-b">${last ? `<div class="faint">${last.started_at ? "Du " + fmtDate(last.started_at) + " au " : "Jusqu'au "}${fmtDate(last.ended_at)}</div>
+          <div class="counts" style="margin:10px 0 0;grid-template-columns:repeat(2,1fr)">
+            ${[["new_contents", "nouveaux contenus"], ["new_tools", "nouveaux outils"], ["actions_proposed", "actions proposées"], ["actions_done", "actions terminées"]]
+              .map(([k, l]) => `<div class="stat"><div class="v">${last.stats[k] ?? 0}</div><div class="l">${l}</div></div>`).join("")}</div>`
+          : `<p class="empty">Aucun bilan enregistré.<br>${st.new_since_last_review} contenu(s) à passer en revue.</p>
+             <button class="btn primary" data-nav="review">Faire un premier bilan</button>`}</div></section>
+    </div>`;
+}
+function thumbMini(c) {
+  const u = imgUrl(c.thumbnail);
+  return `<div style="width:44px;height:44px;border-radius:8px;overflow:hidden;background:var(--surface-2);flex:none">
+    ${u ? `<img src="${esc(u)}" alt="" style="width:100%;height:100%;object-fit:cover">` : ""}</div>`;
+}
+
+// ------------------------------------------------------------------ BIBLIOTHEQUE
+async function loadContents() {
+  if (!S.contents.length) S.contents = (await api("/contents?limit=500")).items;
+  return S.contents;
+}
+function libPass(c, skip) {
+  const L = S.lib;
+  if (skip !== "q" && L.ids && !L.ids.has(c.id)) return false;
+  if (skip !== "platform" && L.platform && platCls(c.platform) !== L.platform) return false;
+  if (skip !== "category" && skip !== "sub" && L.category && c.category !== L.category) return false;
+  if (skip !== "sub" && L.sub && !c.subthemes.includes(L.sub)) return false;
+  if (skip !== "tags") for (const t of L.tags) if (!c.tags.includes(t)) return false;
+  return true;
+}
+async function viewLibrary(el) {
+  const items = await loadContents();
+  const L = S.lib;
+  const count = (skip, test) => items.filter(c => libPass(c, skip) && test(c)).length;
+  const cats = {};
+  items.forEach(c => { if (c.category) { cats[c.category] ??= new Set(); c.subthemes.forEach(s => cats[c.category].add(s)); } });
+  const tagFreq = {};
+  items.forEach(c => c.tags.forEach(t => tagFreq[t] = (tagFreq[t] || 0) + 1));
+  const res = items.filter(c => libPass(c));
+  const fbtn = (label, n, on, attrs, cls = "") => `<button class="fbtn ${cls}${on ? " on" : ""}" ${attrs} ${!n && !on ? "disabled" : ""}>
+      <span>${esc(label)}</span><span class="n">${n}</span></button>`;
+  const active = [L.platform, L.category, L.sub, ...L.tags].filter(Boolean);
+  el.innerHTML = `<div class="lib">
+    <aside class="facets">
+      <div class="facet"><h4>Plateforme</h4><div class="seg">
+        ${[["", "Tous"], ["tiktok", "TikTok"], ["instagram", "Instagram"]].map(([v, l]) =>
+          `<button class="${L.platform === v ? "on" : ""}" data-lib-platform="${v}">${l}<span class="n">${count("platform", c => !v || platCls(c.platform) === v)}</span></button>`).join("")}
+      </div></div>
+      <div class="facet"><h4>Catégories</h4>
+        ${fbtn("Toutes", count("category", () => true), !L.category, 'data-lib-cat=""')}
+        ${Object.keys(cats).sort((a, b) => a.localeCompare(b, "fr")).map(cat => fbtn(cat, count("category", c => c.category === cat), L.category === cat && !L.sub, `data-lib-cat="${esc(cat)}"`)
+          + (L.category === cat ? [...cats[cat]].sort((a, b) => a.localeCompare(b, "fr")).map(s =>
+            fbtn(s, count("sub", c => c.category === cat && c.subthemes.includes(s)), L.sub === s, `data-lib-sub="${esc(s)}"`, "sub")).join("") : "")).join("")}
+      </div>
+      <div class="facet"><h4>Tags</h4><div class="tags">
+        ${Object.keys(tagFreq).sort((a, b) => tagFreq[b] - tagFreq[a] || a.localeCompare(b, "fr")).map(t => {
+          const on = L.tags.has(t);
+          const n = count("tags", c => [...L.tags, t].every(x => c.tags.includes(x)));
+          return !n && !on ? "" : `<button class="chip${on ? " on" : ""}" data-lib-tag="${esc(t)}">${esc(t)} <span class="faint" style="color:inherit;opacity:.7">${n}</span></button>`;
+        }).join("")}
+      </div></div>
+    </aside>
+    <section>
+      <div class="lib-bar"><strong>${plural(res.length, "contenu")}</strong>
+        ${L.q ? `<span class="chip">« ${esc(L.q)} »</span>` : ""}
+        ${active.map(a => `<span class="chip">${esc(a)}</span>`).join("")}
+        ${active.length || L.q ? `<button class="btn sm" data-lib-reset>Réinitialiser les filtres</button>` : ""}</div>
+      ${res.length ? `<div class="cards">${res.map(card).join("")}</div>` :
+        `<div class="panel" style="padding:40px;text-align:center"><strong>Aucun contenu ne correspond à ces critères.</strong>
+         <p class="muted">Essayez un autre mot-clé ou retirez un filtre.</p><button class="btn" data-lib-reset>Réinitialiser les filtres</button></div>`}
+    </section></div>`;
+}
+function card(c) {
+  const u = imgUrl(c.thumbnail);
+  return `<article class="ccard" data-open="${c.id}" tabindex="0">
+    <div class="thumb">${u ? `<img src="${esc(u)}" alt="" loading="lazy">` : `<div class="ph">Pas de capture</div>`}
+      <span class="plat-b">${esc(c.platform || "?")}</span>
+      ${c.source_status === "unavailable" ? `<span class="unav pill warn">Source indisponible</span>` : ""}</div>
+    <div class="ccard-b">
+      <h3>${esc(c.title)}</h3>
+      <div class="faint">@${esc((c.author || "").replace(/^@/, ""))}</div>
+      <div class="row">${c.category ? `<span class="pill cat">${esc(c.category)}</span>` : `<span class="pill soft">Non classé</span>`}
+        ${c.subthemes.map(s => `<span class="pill sub">${esc(s)}</span>`).join("")}</div>
+      <div class="clamp">${esc(c.description || "")}</div>
+      ${c.tags.length ? `<div class="tags">${c.tags.slice(0, 6).map(t => `<span class="chip">${esc(t)}</span>`).join("")}${c.tags.length > 6 ? `<span class="faint">+${c.tags.length - 6}</span>` : ""}</div>` : ""}
+      <div class="ccard-f"><span><b>${c.resources_count}</b> ressource${c.resources_count > 1 ? "s" : ""}</span>
+        <span><b>${c.actions_count}</b> action${c.actions_count > 1 ? "s" : ""}</span>
+        ${c.description_source === "manual" ? `<span style="margin-left:auto">✎ modifié</span>` : ""}</div>
+    </div></article>`;
+}
+
+// ------------------------------------------------------------------ FICHE DETAILLEE
+async function openContent(id, keepEdit = false) {
+  S.drawerId = id;
+  if (!keepEdit) S.drawerEdit = {};
+  const d = $("#drawer");
+  if (!d.classList.contains("open")) { d.innerHTML = `<div class="loading">Chargement…</div>`; }
+  d.classList.add("open"); $("#scrim").classList.add("open");
+  try { renderDrawer(await api(`/contents/${id}`)); } catch (e) { d.innerHTML = `<div class="loading">${esc(e.message)}</div>`; }
+}
+function closeDrawer() {
+  $("#drawer").classList.remove("open"); $("#scrim").classList.remove("open");
+  S.drawerId = null; S.drawerEdit = {};
+}
+function renderDrawer(c) {
+  S.drawerContent = c;
+  const E = S.drawerEdit;
+  const descBadge = c.description_source === "manual" ? `<span class="pill ok">✎ Modifiée manuellement</span>`
+    : c.description_source === "ai" ? `<span class="pill soft">Automatique (IA)</span>` : `<span class="pill soft">Automatique (originale)</span>`;
+  const shots = c.media.map(m => imgUrl(m.path)).filter(Boolean);
+  const cats = [...new Set(S.contents.map(x => x.category).filter(Boolean))];
+  $("#drawer").innerHTML = `
+    <div class="drawer-h"><span class="plat ${platCls(c.platform)}">${esc(c.platform)}</span><span class="faint">#${c.id}</span>
+      <div style="margin-left:auto" class="row">
+        <button class="btn sm" data-content-export="${c.id}">Exporter vers ▾</button>
+        <a class="btn sm dark" href="${esc(safeHref(c.source_url))}" target="_blank" rel="noopener noreferrer">Voir la vidéo ↗</a>
+        <button class="btn sm ghost" data-close aria-label="Fermer">✕</button></div></div>
+    <div class="drawer-b">
+      ${c.source_status === "unavailable" ? `<div class="banner">⚠ Source originale indisponible — contenu archivé dans le Vault</div>` : ""}
+      <div>
+        ${E.title ? `<div class="row"><input class="input grow" id="ed-title" value="${esc(c.title)}">
+            <button class="btn primary sm" data-save-title>Enregistrer</button><button class="btn sm" data-cancel="title">Annuler</button></div>`
+          : `<div class="row" style="align-items:flex-start"><div class="title-big grow">${esc(c.title)}</div>
+            <button class="btn sm ghost" data-edit="title">Modifier</button></div>`}
+        <div class="kv" style="margin-top:12px">
+          <span>Auteur</span><span>@${esc((c.author || "").replace(/^@/, ""))}</span>
+          <span>Lien source</span><span style="overflow-wrap:anywhere"><a href="${esc(safeHref(c.source_url))}" target="_blank" rel="noopener noreferrer">${esc(c.source_url)}</a></span>
+          <span>Statut source</span><span><select class="status-sel" data-source-status>
+            ${[["unknown", "Inconnu"], ["available", "Disponible"], ["unavailable", "Indisponible"]].map(([v, l]) => `<option value="${v}" ${c.source_status === v ? "selected" : ""}>${l}</option>`).join("")}
+          </select></span>
+          <span>Ajouté</span><span>${fmtDate(c.ingested_at || c.created_at)}${c.source_file ? ` · <span class="faint">${esc(c.source_file)}</span>` : ""}</span>
+        </div>
+      </div>
+
+      <section class="sec"><div class="sec-h"><h4>Description</h4>${descBadge}
+        <div class="right">${E.desc ? "" : `<button class="btn sm" data-edit="desc">Modifier</button>`}
+          ${c.description_source === "manual" && !E.desc ? `<button class="btn sm" data-revert-desc>Revenir à la description ${c.description_ai ? "IA" : "originale"}</button>` : ""}</div></div>
+        ${E.desc ? `<textarea class="input" id="ed-desc" rows="6">${esc(c.description || "")}</textarea>
+          <div class="row" style="margin-top:8px"><button class="btn primary sm" data-save-desc>Enregistrer</button>
+          <button class="btn sm" data-cancel="desc">Annuler</button>
+          <span class="faint">Enregistrée comme description manuelle, prioritaire sur l'IA.</span></div>`
+          : `<div class="desc">${esc(c.description || "—")}</div>`}
+        ${c.description_source !== "ai" && c.description_ai ? `<details class="sub"><summary>Description IA</summary><div class="body">${esc(c.description_ai)}</div></details>` : ""}
+        ${c.description_original ? `<details class="sub"><summary>Description originale (plateforme)</summary><div class="body">${esc(c.description_original)}</div></details>` : ""}
+        ${c.revisions.length ? `<details class="sub"><summary>Historique des modifications (${c.revisions.length})</summary><div class="body">${c.revisions.map(r =>
+          `<div style="margin-bottom:6px"><strong>${esc(r.field)}</strong> · ${r.edited_by === "user" ? "vous" : "IA"} · ${fmtDateTime(r.created_at)}<br><span class="faint">avant : ${esc((r.old_value ?? "∅").slice(0, 160))}</span></div>`).join("")}</div></details>` : ""}
+      </section>
+
+      <section class="sec"><div class="sec-h"><h4>Classification</h4>
+        <div class="right">${E.classif ? "" : `<button class="btn sm" data-edit="classif">Modifier</button>`}</div></div>
+        ${E.classif ? `<div class="form-grid">
+            <label class="f full">Catégorie<input class="input" id="ed-cat" list="dl-cats" value="${esc(E.classif.category)}">
+              <datalist id="dl-cats">${cats.map(x => `<option value="${esc(x)}">`).join("")}</datalist></label>
+            <label class="f full">Sous-thèmes (3 maximum)${chipEditor("subthemes", E.classif.subthemes)}</label>
+            <label class="f full">Tags${chipEditor("tags", E.classif.tags)}</label></div>
+            <div class="row" style="margin-top:10px"><button class="btn primary sm" data-save-classif>Enregistrer</button>
+            <button class="btn sm" data-cancel="classif">Annuler</button></div>`
+          : `<div class="kv"><span>Catégorie</span><span>${c.category ? `<span class="pill cat">${esc(c.category)}</span>` : "—"}</span>
+             <span>Sous-thèmes</span><span class="row">${c.subthemes.map(s => `<span class="pill sub">${esc(s)}</span>`).join("") || "—"}</span>
+             <span>Tags</span><span class="tags">${c.tags.map(t => `<span class="chip">${esc(t)}</span>`).join("") || "—"}</span></div>`}
+      </section>
+
+      <section class="sec"><div class="sec-h"><h4>Ressources (${c.resources.length})</h4>
+        <div class="right"><button class="btn sm" data-edit="res">+ Ajouter</button></div></div>
+        ${E.res ? `<div class="form-grid" style="margin-bottom:10px">
+            <label class="f">Nom<input class="input" id="ed-res-name"></label>
+            <label class="f">Type<select class="input" id="ed-res-type">${S.config.resource_types.map(t => `<option ${t === "autre" ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
+            <label class="f full">Description<input class="input" id="ed-res-desc"></label>
+            <div class="row full"><button class="btn primary sm" data-save-res>Ajouter la ressource</button><button class="btn sm" data-cancel="res">Annuler</button></div></div>` : ""}
+        <ul class="list">${c.resources.map(r => `<li>
+          <div class="grow"><div class="t">${esc(r.name)}</div>${r.description ? `<div class="faint">${esc(r.description)}</div>` : ""}</div>
+          <select class="status-sel" data-res-type="${r.id}" title="Type de ressource">${S.config.resource_types.map(t => `<option ${t === r.type ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
+          <button class="btn sm" data-new-action='${esc(JSON.stringify({ content_id: c.id, resource_id: r.id, title: (["outil", "logiciel", "application", "site", "service"].includes(r.type) ? "Tester " : "Approfondir ") + r.name, action_type: ["outil", "logiciel", "application", "site", "service"].includes(r.type) ? "tester" : "approfondir" }))}'>→ Action</button></li>`).join("")
+          || `<li class="empty">Aucune ressource détectée.</li>`}</ul>
+      </section>
+
+      <section class="sec"><div class="sec-h"><h4>Actions (${c.actions.length})</h4>
+        <div class="right"><button class="btn sm" data-new-action='${esc(JSON.stringify({ content_id: c.id }))}'>+ Action</button></div></div>
+        ${c.actions.map(actionRow).join("") || `<div class="empty">Aucune action. Transformez ce contenu en action utile.</div>`}
+      </section>
+
+      <section class="sec"><div class="sec-h"><h4>Notes personnelles (${c.notes.length})</h4></div>
+        ${c.notes.map(n => E.note === n.id ? `<div class="note"><textarea class="input" id="ed-note-${n.id}" rows="3">${esc(n.text)}</textarea>
+            <div class="row" style="margin-top:6px"><button class="btn primary sm" data-save-note="${n.id}">Enregistrer</button><button class="btn sm" data-cancel="note">Annuler</button></div></div>`
+          : `<div class="note"><p>${esc(n.text)}</p><div class="row faint">${fmtDateTime(n.updated_at)}
+            <button class="btn sm ghost" data-edit-note="${n.id}">Modifier</button><button class="btn sm ghost danger" data-del-note="${n.id}">Supprimer</button></div></div>`).join("")}
+        <textarea class="input" id="new-note" rows="2" placeholder="Ajouter une note…" style="min-height:60px"></textarea>
+        <div class="row" style="margin-top:6px"><button class="btn sm" data-add-note>Ajouter la note</button></div>
+      </section>
+
+      ${shots.length ? `<section class="sec"><div class="sec-h"><h4>Captures (${shots.length})</h4></div>
+        <div class="shots">${shots.map(u => `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="" loading="lazy"></a>`).join("")}</div></section>` : ""}
+
+      <section class="sec"><div class="sec-h"><h4>Transcription</h4></div>
+        ${c.transcript ? `<details class="sub" style="border:0;margin:0;padding:0"><summary>Afficher la transcription (${c.transcript.split(/\s+/).length} mots)</summary><div class="body">${esc(c.transcript)}</div></details>`
+          : `<div class="empty" style="padding:0">Pas de transcription exploitable.</div>`}
+      </section>
+    </div>`;
+}
+function chipEditor(field, values) {
+  return `<div class="chipedit" data-chips="${field}">${values.map((v, i) => `<span class="chip">${esc(v)}<button class="x" data-chip-del="${field}:${i}" aria-label="Retirer">✕</button></span>`).join("")}
+    <input data-chip-input="${field}" placeholder="${field === "tags" ? "Ajouter un tag + Entrée" : "Ajouter + Entrée"}"></div>`;
+}
+async function patchContent(body, msg) {
+  try {
+    const c = await api(`/contents/${S.drawerId}`, { method: "PATCH", body });
+    S.drawerEdit = {}; renderDrawer(c); toast(msg || "Modification enregistrée dans vault.db");
+    S.contents = []; refreshStats(); if (S.view === "library" || S.view === "dashboard") render();
+  } catch (e) { fail(e); }
+}
+
+// ------------------------------------------------------------------ RESSOURCES
+async function viewResources(el) {
+  const R = S.res;
+  const qs = new URLSearchParams(); if (R.type) qs.set("type", R.type); if (R.q) qs.set("q", R.q);
+  const [all, cat] = await Promise.all([api("/resources/catalog"), api("/resources/catalog?" + qs)]);
+  el.innerHTML = `
+    <div class="row" style="margin-bottom:14px">
+      <input class="input search" id="res-q" type="search" placeholder="Rechercher une ressource…" value="${esc(R.q)}" style="max-width:320px">
+      <div class="tags"><button class="chip${!R.type ? " on" : ""}" data-res-type-f="">Tous <span style="opacity:.7">${all.total}</span></button>
+        ${S.config.resource_types.filter(t => all.types[t]).map(t => `<button class="chip${R.type === t ? " on" : ""}" data-res-type-f="${esc(t)}">${esc(t)} <span style="opacity:.7">${all.types[t]}</span></button>`).join("")}</div>
+    </div>
+    <div class="panel scroll-x">${cat.items.length ? `<table class="tbl"><thead><tr><th>Nom</th><th>Type</th><th>Description</th><th>Mentions</th><th>Contenus sources</th><th>Actions associées</th><th></th></tr></thead><tbody>
+      ${cat.items.map(g => `<tr>
+        <td><strong>${esc(g.name)}</strong>${g.url ? `<br><a class="faint" href="${esc(safeHref(g.url))}" target="_blank" rel="noopener">${esc(g.url)}</a>` : ""}</td>
+        <td><select class="status-sel" data-res-group-type="${esc(JSON.stringify(g.resource_ids))}">${S.config.resource_types.map(t => `<option ${t === g.type ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></td>
+        <td class="muted" style="max-width:320px">${esc(g.descriptions.join(" · ")) || "—"}</td>
+        <td><strong>${g.mentions}</strong> <span class="faint">contenu${g.mentions > 1 ? "s" : ""}</span></td>
+        <td>${g.contents.map(c => `<div><button class="link" data-open="${c.id}">${esc(c.title)}</button></div>`).join("")}</td>
+        <td>${g.actions.map(a => `<div class="row">${statusDot(a.status)}<span>${esc(a.title)}</span></div>`).join("") || `<span class="faint">—</span>`}</td>
+        <td><button class="btn sm" data-new-action='${esc(JSON.stringify({ content_id: g.contents[0].id, resource_id: g.resource_ids[0], title: (["outil", "logiciel", "application", "site", "service"].includes(g.type) ? "Tester " : "Approfondir ") + g.name, action_type: ["outil", "logiciel", "application", "site", "service"].includes(g.type) ? "tester" : "approfondir" }))}'>→ Action</button></td>
+      </tr>`).join("")}</tbody></table>` : `<div class="empty" style="padding:30px;text-align:center">Aucune ressource ne correspond.</div>`}</div>`;
+}
+
+// ------------------------------------------------------------------ ACTIONS
+async function viewActions(el) {
+  const A = S.act;
+  const r = await api("/actions?limit=1000");
+  const all = r.items;
+  const f = a => (!A.life || a.lifecycle === A.life) && (!A.type || a.action_type === A.type) && (!A.provider || (A.provider === "none" ? !a.external_provider : a.external_provider === A.provider))
+    && (!A.q || fold([a.title, a.description, a.content_title, a.resource_name].join(" ")).includes(fold(A.q)));
+  const items = all.filter(f);
+  const providers = [...new Set(all.map(a => a.external_provider).filter(Boolean))];
+  const nLife = k => k ? r.counts[k] : all.filter(a => a.lifecycle !== "ignored" || A.showDismissed).length;
+  const head = `<div class="row" style="margin-bottom:10px"><div class="seg">${LIFE_FILTERS.map(([k, l]) =>
+      `<button class="${(A.life || "") === k ? "on" : ""}" data-act-life="${k}">${l}<span class="n">${nLife(k)}</span></button>`).join("")}</div></div>
+    <div class="row" style="margin-bottom:14px">
+      <div class="seg"><button class="${A.mode === "kanban" ? "on" : ""}" data-act-mode="kanban">Kanban</button><button class="${A.mode === "list" ? "on" : ""}" data-act-mode="list">Liste</button></div>
+      <input class="input search" id="act-q" type="search" placeholder="Filtrer les actions…" value="${esc(A.q)}" style="max-width:240px">
+      <select class="input" id="act-type" style="width:auto"><option value="">Tous les types</option>${S.config.action_types.map(t => `<option ${A.type === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
+      <select class="input" id="act-provider" style="width:auto"><option value="">Tous les providers</option><option value="none" ${A.provider === "none" ? "selected" : ""}>Non envoyées</option>${providers.map(p => `<option ${A.provider === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
+      <label class="row faint"><input type="checkbox" id="act-dismissed" ${A.showDismissed ? "checked" : ""}> Afficher les ignorées</label>
+      <button class="btn primary" style="margin-left:auto" data-new-action='{}'>+ Nouvelle action</button></div>`;
+  if (A.mode === "kanban") {
+    const cols = BOARD.concat(A.showDismissed || A.life === "ignored" ? ["dismissed"] : []);
+    el.innerHTML = head + `<div class="board" style="grid-template-columns:repeat(${cols.length},minmax(230px,1fr))">${cols.map(s => {
+      const list = items.filter(a => a.status === s);
+      return `<div class="col" data-drop="${s}"><div class="col-h">${statusDot(s)}${esc(STATUS[s])}<span class="n">${list.length}</span></div>
+        ${list.map(acard).join("") || `<div class="faint" style="padding:6px 4px">Glissez une action ici</div>`}</div>`;
+    }).join("")}</div>
+    <p class="faint">Glissez-déposez une carte pour changer son statut. Une action n'est envoyée vers un outil externe que sur votre demande, après validation.</p>`;
+  } else {
+    const rows = items.filter(a => A.showDismissed || A.life === "ignored" || a.status !== "dismissed");
+    el.innerHTML = head + `<div class="panel scroll-x">${rows.length ? `<table class="tbl"><thead><tr><th>Action</th><th>Type</th><th>Priorité</th><th>Échéance</th><th>Contenu source</th><th>Catégorie</th><th>Cycle</th><th>Statut détaillé</th><th>Gérer</th></tr></thead><tbody>
+      ${rows.map(a => `<tr><td><strong>${esc(a.title)}</strong>${a.resource_name ? `<div class="faint">↳ ${esc(a.resource_name)}</div>` : ""}</td>
+        <td>${typeBadge(a.action_type)}</td><td>${prioBadge(a.priority) || `<span class="faint">—</span>`}</td>
+        <td class="${isLate(a.due_date) && !["done", "archived", "dismissed"].includes(a.status) ? "due late" : ""}">${a.due_date ? fmtDate(a.due_date) : `<span class="faint">—</span>`}</td>
+        <td>${a.content_id ? `<button class="link" data-open="${a.content_id}">${esc(a.content_title)}</button>` : "—"}</td>
+        <td>${a.content_category ? `<span class="pill sub">${esc(a.content_category)}</span>` : ""}</td>
+        <td>${lifePill(a.lifecycle)}</td>
+        <td><select class="status-sel" data-status-sel="${a.id}">${Object.keys(STATUS).map(s => `<option value="${s}" ${a.status === s ? "selected" : ""}>${esc(STATUS[s])}</option>`).join("")}</select></td>
+        <td><div class="ctl"><button class="btn sm ghost" data-edit-action="${a.id}">✎</button>${lifecycleControls(a)}</div></td></tr>`).join("")}
+      </tbody></table>` : `<div class="empty" style="padding:30px;text-align:center">Aucune action. Créez-en une depuis un contenu, une ressource ou un bilan.</div>`}</div>`;
+  }
+}
+function acard(a) {
+  const late = isLate(a.due_date) && !["done", "archived", "dismissed"].includes(a.status);
+  return `<div class="acard" draggable="true" data-drag="${a.id}" style="--sc:var(--s-${a.status})">
+    <div class="t">${esc(a.title)}</div>
+    <div class="meta">${prioBadge(a.priority)}${typeBadge(a.action_type)}
+      ${a.due_date ? `<span class="${late ? "due late" : ""}">📅 ${fmtDate(a.due_date)}</span>` : ""}
+      ${lifePill(a.lifecycle)}
+      ${a.proposed_by && a.proposed_by !== "user" ? `<span class="pill soft">par ${esc(a.proposed_by)}</span>` : ""}</div>
+    ${a.content_id ? `<div class="src" title="${esc(a.content_title)}">↳ <span class="link" role="link" tabindex="0" data-open="${a.content_id}" style="font-weight:400;cursor:pointer">${esc(a.content_title)}</span>${a.content_category ? ` · ${esc(a.content_category)}` : ""}</div>` : ""}
+    <div class="acts">${lifecycleControls(a)}<button class="btn sm ghost" data-edit-action="${a.id}">Modifier</button></div>
+  </div>`;
+}
+// Transitions du cycle de vie (API generique ; aucun envoi externe automatique).
+async function actionDo(btn, id, verb) {
+  btn.disabled = true;
+  try {
+    await api(`/actions/${id}/${verb}`, { method: "POST" });
+    toast({ approve: "Action validée", ignore: "Action ignorée", complete: "Action terminée" }[verb]);
+    await refreshAll();
+  } catch (e) { fail(e); btn.disabled = false; }
+}
+async function actionSend(btn, id, provider) {
+  btn.disabled = true;
+  const txt = btn.textContent; btn.textContent = "Envoi…";
+  try {
+    // Sans fournisseur precise : gestionnaire par defaut (TASK_PROVIDER / reglage) cote serveur.
+    const r = await api(`/actions/${id}/send`, { method: "POST", body: provider ? { connector: provider } : {} });
+    toast(`✓ ${r.updated ? "Tâche mise à jour" : "Envoyée"} dans ${esc(connLabel(r.provider))}${r.external_url ? ` · <a href="${esc(safeHref(r.external_url))}" target="_blank" rel="noopener">ouvrir</a>` : ""}`);
+    await refreshAll();
+  } catch (e) {
+    // external_missing : la tache a ete supprimee chez le fournisseur ; le lien est retire, l'action
+    // redevient "validee" et peut etre renvoyee (recreee) d'un clic.
+    fail(e);
+    if (e.code === "external_missing") await refreshAll();
+    else { btn.disabled = false; btn.textContent = txt; }
+  }
+}
+async function setActionStatus(id, status) {
+  try {
+    await api(`/actions/${id}`, { method: "PATCH", body: { status } });
+    toast(`Action → ${esc(STATUS[status])}`);
+    await refreshAll();
+  } catch (e) { fail(e); }
+}
+function actionDialog(init = {}, existing = null) {
+  const a = existing || { title: "", description: "", action_type: "", priority: "", due_date: "", status: "approved", ...init };
+  const dlg = $("#dlg");
+  dlg.innerHTML = `<form method="dialog" id="act-form">
+    <div class="dlg-h"><h3>${existing ? "Modifier l'action" : "Nouvelle action"}</h3></div>
+    <div class="dlg-b form-grid">
+      <label class="f full">Titre<input class="input" name="title" required value="${esc(a.title)}"></label>
+      <label class="f full">Description<textarea class="input" name="description" rows="3" style="min-height:70px">${esc(a.description || "")}</textarea></label>
+      <label class="f">Type<select class="input" name="action_type"><option value="">—</option>${S.config.action_types.map(t => `<option ${a.action_type === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
+      <label class="f">Priorité<select class="input" name="priority"><option value="">—</option>${[1, 2, 3, 4].map(p => `<option value="${p}" ${+a.priority === p ? "selected" : ""}>P${p} · ${PRIO[p]}</option>`).join("")}</select></label>
+      <label class="f">Échéance<input class="input" type="date" name="due_date" value="${esc(a.due_date || "")}"></label>
+      <label class="f">Statut<select class="input" name="status">${Object.keys(STATUS).map(s => `<option value="${s}" ${a.status === s ? "selected" : ""}>${esc(STATUS[s])}</option>`).join("")}</select></label>
+      ${a.content_title || init.content_id ? `<div class="full faint">Contenu source : ${esc(a.content_title || (S.contents.find(c => c.id === init.content_id) || {}).title || "#" + init.content_id)}</div>` : ""}
+    </div>
+    <div class="dlg-f"><button class="btn" value="cancel" formnovalidate>Annuler</button><button class="btn primary" value="ok">${existing ? "Enregistrer" : "Créer l'action"}</button></div></form>`;
+  dlg.showModal();
+  $("#act-form").onsubmit = async ev => {
+    if (ev.submitter && ev.submitter.value === "cancel") return;
+    ev.preventDefault();
+    const fd = Object.fromEntries(new FormData(ev.target));
+    const body = { title: fd.title.trim(), description: fd.description || null, action_type: fd.action_type || null,
+      priority: fd.priority ? +fd.priority : null, due_date: fd.due_date || null, status: fd.status };
+    try {
+      if (existing) await api(`/actions/${existing.id}`, { method: "PATCH", body });
+      else await api("/actions", { method: "POST", body: { ...body, content_id: init.content_id ?? null, resource_id: init.resource_id ?? null } });
+      dlg.close(); toast(existing ? "Action modifiée" : "Action créée dans vault.db");
+      await refreshAll();
+    } catch (e) { fail(e); }
+  };
+}
+
+// ------------------------------------------------------------------ REVIEW
+const BLOCKS = [
+  ["discovered", "Ce que j'ai découvert", "✦", "var(--accent)"],
+  ["tools_to_test", "Outils à tester", "⚙", "#0c8599"],
+  ["ideas_to_exploit", "Idées à exploiter", "💡", "#e67700"],
+  ["to_share", "À partager", "↗", "#c2255c"],
+  ["to_deepen", "À approfondir", "🔍", "#7048e8"],
+  ["priority_actions", "Actions prioritaires", "!", "var(--p1)"],
+];
+async function viewReview(el) {
+  const [prev, hist] = await Promise.all([api("/review/since-last"), api("/reviews")]);
+  let shown = prev, titre = prev.since ? `Depuis le dernier bilan (${fmtDateTime(prev.since)})` : "Depuis le début du Vault", live = true;
+  if (S.reviewShown) {
+    const r = await api(`/reviews/${S.reviewShown}`);
+    if (r.details) { shown = r.details; live = false; titre = `Bilan enregistré le ${fmtDateTime(r.ended_at)}`; }
+  }
+  const c = shown.counts;
+  const item = (t, sub, extra = "") => `<li><div class="grow"><div class="t">${t}</div>${sub ? `<div class="faint">${sub}</div>` : ""}</div>${extra}</li>`;
+  const actItem = a => item(esc(a.title), [a.action_type, a.content_title].filter(Boolean).map(esc).join(" · "), prioBadge(a.priority) + statusPill(a.status));
+  const toAction = o => live ? `<button class="btn sm" data-new-action='${esc(JSON.stringify(o))}'>→ Action</button>` : "";
+  const blockBody = k => {
+    const B = shown.blocks || {};
+    if (k === "discovered") return (B.discovered || []).map(x => item(`<button class="link" data-open="${x.id}">${esc(x.title)}</button>`, esc([x.category, x.platform].filter(Boolean).join(" · ")))).join("");
+    if (k === "tools_to_test") return (B.tools_to_test || []).map(actItem).join("") + (B.tools_without_action || []).map(r =>
+      item(esc(r.name), `${esc(r.type)} · ${esc(r.content_title)} · sans action`, toAction({ content_id: r.content_id, resource_id: r.id, title: "Tester " + r.name, action_type: "tester" }))).join("");
+    if (k === "ideas_to_exploit") return (shown.recurring_ideas || []).map(i => item(`Thème récurrent : ${esc(i.name)}`, `${i.kind === "tag" ? "tag" : "sous-thème"} · ${i.count} nouveaux contenus`)).join("") + (B.ideas_to_exploit || []).map(actItem).join("");
+    return (B[k] || []).map(actItem).join("");
+  };
+  el.innerHTML = `
+    <div class="panel review-hero"><div class="grow"><h3>${esc(titre)}</h3>
+      <div class="faint">${live ? `Période en cours, jusqu'à maintenant. Générer le bilan l'enregistre dans l'historique et ouvre une nouvelle période.` : `Instantané conservé dans vault.db (table reviews).`}</div></div>
+      ${live ? `<button class="btn primary" data-review-generate>Générer un bilan depuis le dernier bilan</button>` : `<button class="btn" data-review-show="">← Revenir à la période en cours</button>`}</div>
+    <div class="counts">${[["new_contents", "Nouveaux contenus"], ["new_resources", "Nouvelles ressources"], ["new_tools", "Nouveaux outils"], ["recurring_ideas", "Thèmes récurrents"],
+      ["actions_proposed", "Actions proposées"], ["actions_validated", "Actions validées"], ["actions_done", "Actions terminées"], ["contents_without_action", "Contenus sans action"]]
+      .map(([k, l]) => `<div class="stat"><div class="v">${c[k] ?? 0}</div><div class="l">${l}</div></div>`).join("")}</div>
+    ${shown.blocks ? `<div class="blocks">${BLOCKS.map(([k, l, ic, col]) => {
+      const body = blockBody(k);
+      return `<section class="panel block" style="--bc:${col}"><div class="panel-h"><span class="ico">${ic}</span><h3>${l}</h3></div>
+        <div class="panel-b"><ul class="list">${body || `<li class="empty">Rien pour cette période.</li>`}</ul></div></section>`;
+    }).join("")}
+      <section class="panel block" style="--bc:var(--warn)"><div class="panel-h"><span class="ico">○</span><h3>Contenus sans action</h3></div>
+        <div class="panel-b"><ul class="list">${(shown.contents_without_action || []).map(x => item(`<button class="link" data-open="${x.id}">${esc(x.title)}</button>`, esc(x.category || ""), toAction({ content_id: x.id }))).join("") || `<li class="empty">Aucun.</li>`}</ul></div></section>
+    </div>` : `<div class="panel empty" style="padding:20px">Ce bilan ancien ne contient que des compteurs.</div>`}
+    <h3 class="section-t" style="margin-top:26px"><span>Historique des bilans</span><span class="faint">${hist.items.length}</span></h3>
+    <div class="panel"><div class="panel-b" style="padding-top:8px"><ul class="list history">${hist.items.map(r => `<li data-review-show="${r.id}">
+      <div class="grow"><div class="t">${r.started_at ? `Du ${fmtDate(r.started_at)} au ${fmtDate(r.ended_at)}` : `Jusqu'au ${fmtDate(r.ended_at)}`}</div>
+      <div class="faint">${esc((r.summary || "").split("\n").slice(0, 2).join(" · "))}</div></div>
+      <span class="pill soft">${r.stats.new_contents ?? 0} contenus</span><span class="pill soft">${r.stats.actions_proposed ?? 0} actions</span></li>`).join("")
+      || `<li class="empty">Aucun bilan enregistré.</li>`}</ul></div></div>`;
+}
+
+// ------------------------------------------------------------------ INTEGRATIONS
+async function loadConnectors() {
+  const r = await api("/connectors");
+  S.connectors = r.items; S.taskProvider = r.task_provider; S.taskProviderInfo = r.task_provider_info;
+  return S.connectors;
+}
+function connState(c) {
+  if (c.configured) return c.local ? `<span class="pill ok">● Disponible (local)</span>` : `<span class="pill ok">● Connecté</span>`;
+  return `<span class="pill soft">○ Non configuré</span>`;
+}
+async function viewIntegrations(el) {
+  const items = await loadConnectors();
+  const tpi = S.taskProviderInfo || {};
+  const cardC = c => `<div class="panel int">
+    <div class="int-top"><div class="logo" style="background:${LOGO[c.name] || "#495057"}">${esc(c.label[0])}</div>
+      <div class="grow"><h3>${esc(c.label)}</h3><div class="faint">${c.groups.includes("tasks") && c.task_priority ? `Gestionnaire de tâches · priorité ${c.task_priority}` : "Consultation / export"}</div></div>
+      ${connState(c)}</div>
+    <p>${esc(c.description)}</p>
+    <div class="caps">${c.capabilities.map(k => `<span class="pill soft">${esc(CAPS[k] || k)}</span>`).join("")}${c.is_task_provider ? `<span class="pill ok">★ Gestionnaire par défaut</span>` : ""}</div>
+    <div class="faint">Dernière synchronisation : ${c.sync && c.sync.last_success ? fmtDateTime(c.sync.last_success) : "jamais"}${c.sync && c.sync.last_status && c.sync.last_status !== "ok" ? ` · dernière tentative : ${esc(c.sync.last_status === "not_configured" ? "non configuré" : "erreur")}` : ""}</div>
+    <div class="foot"><button class="btn sm" data-conf="${esc(c.name)}">Configurer</button>
+      <button class="btn sm ${c.configured ? "primary" : ""}" data-sync="${esc(c.name)}" ${c.configured && c.capabilities.includes("export_vault") ? "" : "disabled"}
+        title="${c.configured ? (c.capabilities.includes("export_vault") ? "Exporter tout le Vault" : "Synchronisation élément par élément (fiche ou action)") : "Non configuré"}">Synchroniser</button>
+      ${c.groups.includes("tasks") && c.capabilities.includes("send_action") ? (c.is_task_provider
+        ? (tpi.source === "setting" ? `<button class="btn sm ghost" data-set-provider="">Retirer par défaut</button>` : "")
+        : `<button class="btn sm" data-set-provider="${esc(c.name)}" ${c.configured && tpi.source !== "env" ? "" : "disabled"}
+            title="${tpi.source === "env" ? "Défini par la variable TASK_PROVIDER" : c.configured ? "Utiliser pour « Envoyer vers »" : "Non configuré"}">Définir par défaut</button>`) : ""}</div>
+  </div>`;
+  const exp = items.filter(c => c.groups.includes("export"));
+  const tasks = items.filter(c => c.groups.includes("tasks")).sort((a, b) => (a.task_priority || 99) - (b.task_priority || 99));
+  el.innerHTML = `
+    <div class="section-t"><h3>Consultation / export</h3><span class="faint">vault.db reste la source de vérité ; ces outils reçoivent des copies.</span></div>
+    <div class="int-grid">${exp.map(cardC).join("")}</div>
+    <div class="section-t"><h3>Gestion structurée des actions</h3>
+      <span class="faint">Gestionnaire par défaut : <strong>${esc(tpi.label || "aucun")}</strong>${tpi.source === "env" ? " (variable TASK_PROVIDER)" : tpi.source === "setting" ? " (choisi ici)" : ""}.
+        Seules les actions validées sont envoyées, et uniquement sur votre clic.</span></div>
+    <div class="int-grid">${tasks.map(cardC).join("")}</div>`;
+}
+function confDialog(name) {
+  const c = S.connectors.find(x => x.name === name);
+  const dlg = $("#dlg");
+  dlg.innerHTML = `<form method="dialog"><div class="dlg-h"><div class="logo" style="background:${LOGO[c.name] || "#495057"};margin-right:10px">${esc(c.label[0])}</div><h3>${esc(c.label)}</h3></div>
+    <div class="dlg-b"><p class="muted" style="margin-top:0">${esc(c.description)}</p>
+      <p><strong>Statut :</strong> ${c.configured ? "configuré" : c.implemented ? "variables manquantes" : "connecteur prévu, pas encore branché"}</p>
+      ${c.missing_config.length ? `<p><strong>À définir (variables d'environnement, jamais stockées dans vault.db) :</strong><br>${c.missing_config.map(v => `<code>${esc(v)}</code>`).join(" ")}</p>` : ""}
+      ${c.todo.length ? `<p><strong>Reste à faire :</strong></p><ul>${c.todo.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+      ${c.groups.includes("tasks") ? `<p class="faint">Gestionnaire par défaut : bouton « Définir par défaut » de cette carte, ou variable <code>TASK_PROVIDER=${esc(c.name)}</code> (prioritaire).</p>` : ""}
+    </div><div class="dlg-f"><button class="btn primary" value="ok">Fermer</button></div></form>`;
+  dlg.showModal();
+}
+
+// ------------------------------------------------------------------ menus export / envoi
+function menu(anchor, html) {
+  closeMenu();
+  const m = document.createElement("div");
+  m.className = "menu"; m.id = "menu"; m.innerHTML = html;
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect();
+  const w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + "px";
+  m.style.top = (r.bottom + 6 + h > innerHeight ? Math.max(8, r.top - h - 6) : r.bottom + 6) + "px";
+}
+function closeMenu() { const m = $("#menu"); if (m) m.remove(); }
+const menuItem = (c, attrs, label, enabled) => `<button ${enabled ? attrs : "disabled"}>${esc(label || c.label)}<small>${enabled ? "" : "Non configuré"}</small></button>`;
+async function globalExportMenu(btn) {
+  const items = await loadConnectors();
+  const exp = items.filter(c => c.capabilities.includes("export_vault"));
+  menu(btn, `<h5>Exporter tout le Vault</h5>${exp.map(c => menuItem(c, `data-export-all="${esc(c.name)}"`, "→ " + c.label, c.configured)).join("")}
+    <hr><h5>Synchroniser</h5><button data-nav-menu="integrations">Gérer les intégrations…</button>`);
+}
+async function contentExportMenu(btn, id) {
+  const items = await loadConnectors();
+  const html = items.filter(c => c.groups.includes("export") && (c.capabilities.includes("export_contents") || c.capabilities.includes("send_content")))
+    .map(c => menuItem(c, `data-export-one="${esc(c.name)}:${id}"`, "→ " + c.label, c.configured)).join("");
+  menu(btn, `<h5>Exporter ce contenu vers</h5>${html}`);
+}
+function exportDone(r) {
+  const links = (r.downloads || []).map(u => `<a href="${esc(u)}" download>${esc(decodeURIComponent(u.split("/").pop()))}</a>`).join("<br>");
+  toast(`Export ${esc(r.connector)} terminé${links ? " :<br>" + links : ""}`);
+}
+
+// ------------------------------------------------------------------ evenements
+document.addEventListener("click", async ev => {
+  const t = ev.target.closest("button, [data-open], [data-review-show], a, [role=link]");
+  if (!t) { if (!ev.target.closest("#menu")) closeMenu(); return; }
+  const d = t.dataset;
+  if (!t.closest("#menu") && !("contentExport" in d) && t.id !== "btn-export") closeMenu();
+
+  if (d.nav) return go(d.nav);
+  if (d.navMenu) { closeMenu(); return go(d.navMenu); }
+  if (d.open && !ev.target.closest("[data-chip-del]")) return openContent(+d.open);
+  if ("close" in d) return closeDrawer();
+  if (t.id === "btn-export") return globalExportMenu(t);
+  if (d.newAction !== undefined) return actionDialog(JSON.parse(d.newAction || "{}"));
+  if (d.editAction) return actionDialog({}, await api(`/actions/${d.editAction}`));
+  if (d.actStatus) { const [id, s] = d.actStatus.split(":"); return setActionStatus(+id, s); }
+  if (d.actDo) { const [id, verb] = d.actDo.split(":"); return actionDo(t, +id, verb); }
+  if (d.actSend) return actionSend(t, +d.actSend, d.provider);
+  if (d.actLife !== undefined) { S.act.life = d.actLife; return render(); }
+  if (d.setProvider !== undefined) {
+    try {
+      await api("/settings/task-provider", { method: "PUT", body: { provider: d.setProvider || null } });
+      S.config = await api("/config");
+      toast(d.setProvider ? `Gestionnaire par défaut : ${esc(connLabel(d.setProvider))}` : "Aucun gestionnaire par défaut");
+      render();
+    } catch (e) { fail(e); }
+    return;
+  }
+  if (d.contentExport) return contentExportMenu(t, +d.contentExport);
+  if (d.exportAll) {
+    closeMenu();
+    try { exportDone(await api(`/exports/${d.exportAll}`, { method: "POST", body: {} })); } catch (e) { fail(e); }
+    return;
+  }
+  if (d.exportOne) {
+    closeMenu();
+    const [name, id] = d.exportOne.split(":");
+    const c = S.connectors.find(x => x.name === name);
+    try {
+      if (c.capabilities.includes("export_contents")) exportDone(await api(`/exports/${name}`, { method: "POST", body: { content_ids: [+id] } }));
+      else { const r = await api(`/contents/${id}/send`, { method: "POST", body: { connector: name } }); toast(`Envoyé vers ${esc(c.label)}`); }
+    } catch (e) { fail(e); }
+    return;
+  }
+  if (d.conf) return confDialog(d.conf);
+  if (d.sync) {
+    try { exportDone(await api(`/exports/${d.sync}`, { method: "POST", body: {} })); render(); } catch (e) { fail(e); }
+    return;
+  }
+  // bibliotheque
+  if (d.libPlatform !== undefined) { S.lib.platform = d.libPlatform; return render(); }
+  if (d.libCat !== undefined) { S.lib.category = d.libCat; S.lib.sub = ""; return render(); }
+  if (d.libSub !== undefined) { S.lib.sub = S.lib.sub === d.libSub ? "" : d.libSub; return render(); }
+  if (d.libTag !== undefined) { S.lib.tags.has(d.libTag) ? S.lib.tags.delete(d.libTag) : S.lib.tags.add(d.libTag); return render(); }
+  if ("libReset" in d) { Object.assign(S.lib, { q: "", platform: "", category: "", sub: "", ids: null }); S.lib.tags.clear(); $("#global-search").value = ""; return render(); }
+  // ressources
+  if (d.resTypeF !== undefined) { S.res.type = d.resTypeF; return render(); }
+  // actions
+  if (d.actMode) { S.act.mode = d.actMode; return render(); }
+  // review
+  if ("reviewGenerate" in d) {
+    t.disabled = true;
+    try { const r = await api("/reviews", { method: "POST", body: {} }); S.reviewShown = r.id; toast("Bilan enregistré dans l'historique"); await refreshAll(); } catch (e) { fail(e); t.disabled = false; }
+    return;
+  }
+  if (d.reviewShow !== undefined) { S.reviewShown = d.reviewShow ? +d.reviewShow : null; return render(); }
+  // fiche : edition
+  const E = S.drawerEdit, c = S.drawerContent;
+  if (d.edit) {
+    if (d.edit === "classif") E.classif = { category: c.category || "", subthemes: [...c.subthemes], tags: [...c.tags] };
+    else E[d.edit] = true;
+    renderDrawer(c);
+    const f = { title: "#ed-title", desc: "#ed-desc", res: "#ed-res-name", classif: "#ed-cat" }[d.edit];
+    if (f && $(f)) $(f).focus();
+    return;
+  }
+  if (d.cancel) { delete E[d.cancel]; return renderDrawer(c); }
+  if ("saveTitle" in d) { const v = $("#ed-title").value.trim(); if (v) patchContent({ title: v }, "Titre modifié"); return; }
+  if ("saveDesc" in d) return patchContent({ description_manual: $("#ed-desc").value }, "Description manuelle enregistrée");
+  if ("revertDesc" in d) {
+    try { renderDrawer(await api(`/contents/${c.id}/description/revert`, { method: "POST" })); toast("Description IA rétablie (l'ancienne reste dans l'historique)"); S.contents = []; } catch (e) { fail(e); }
+    return;
+  }
+  if ("saveClassif" in d) {
+    $$("[data-chip-input]").forEach(i => addChip(i.dataset.chipInput, i.value));
+    if (E.classif.subthemes.length > 3) return toast("3 sous-thèmes maximum", true);
+    return patchContent({ category: $("#ed-cat").value.trim() || null, subthemes: E.classif.subthemes, tags: E.classif.tags }, "Classification enregistrée");
+  }
+  if (d.chipDel) { const [f, i] = d.chipDel.split(":"); E.classif[f].splice(+i, 1); E.classif.category = $("#ed-cat").value; renderDrawer(c); return; }
+  if ("saveRes" in d) {
+    const name = $("#ed-res-name").value.trim();
+    if (!name) return;
+    try {
+      await api(`/contents/${c.id}/resources`, { method: "POST", body: { name, type: $("#ed-res-type").value, description: $("#ed-res-desc").value || null } });
+      delete E.res; toast("Ressource ajoutée"); refreshAll();
+    } catch (e) { fail(e); }
+    return;
+  }
+  if ("addNote" in d) {
+    const txt = $("#new-note").value.trim();
+    if (!txt) return;
+    try { await api(`/contents/${c.id}/notes`, { method: "POST", body: { text: txt } }); toast("Note ajoutée"); refreshAll(); } catch (e) { fail(e); }
+    return;
+  }
+  if (d.editNote) { E.note = +d.editNote; return renderDrawer(c); }
+  if (d.saveNote) {
+    try { await api(`/notes/${d.saveNote}`, { method: "PATCH", body: { text: $("#ed-note-" + d.saveNote).value } }); delete E.note; toast("Note modifiée"); openContent(c.id, true); } catch (e) { fail(e); }
+    return;
+  }
+  if (d.delNote) {
+    if (!confirm("Supprimer définitivement cette note ?")) return;
+    try { await api(`/notes/${d.delNote}`, { method: "DELETE" }); toast("Note supprimée"); refreshAll(); } catch (e) { fail(e); }
+  }
+});
+function addChip(field, value) {
+  const E = S.drawerEdit;
+  value.split(",").map(v => v.trim()).filter(Boolean).forEach(v => { if (!E.classif[field].includes(v)) E.classif[field].push(v); });
+}
+document.addEventListener("keydown", ev => {
+  const inp = ev.target.closest && ev.target.closest("[data-chip-input]");
+  if (inp && (ev.key === "Enter" || ev.key === ",")) {
+    ev.preventDefault();
+    S.drawerEdit.classif.category = $("#ed-cat").value;
+    addChip(inp.dataset.chipInput, inp.value);
+    renderDrawer(S.drawerContent);
+    const again = $(`[data-chip-input="${inp.dataset.chipInput}"]`); if (again) again.focus();
+    return;
+  }
+  if (ev.key === "Escape") { closeMenu(); if ($("#drawer").classList.contains("open") && !$("#dlg").open) closeDrawer(); }
+  if (ev.key === "Enter" && ev.target.classList && ev.target.classList.contains("ccard")) openContent(+ev.target.dataset.open);
+});
+document.addEventListener("change", async ev => {
+  const t = ev.target, d = t.dataset;
+  if (d.statusSel) return setActionStatus(+d.statusSel, t.value);
+  if ("sourceStatus" in d) return patchContent({ source_status: t.value }, "Statut de la source mis à jour");
+  if (d.resType) {
+    try { await api(`/resources/${d.resType}`, { method: "PATCH", body: { type: t.value } }); toast("Type de ressource modifié"); refreshStats(); } catch (e) { fail(e); }
+    return;
+  }
+  if (d.resGroupType) {
+    try { for (const id of JSON.parse(d.resGroupType)) await api(`/resources/${id}`, { method: "PATCH", body: { type: t.value } }); toast("Type de ressource modifié"); render(); } catch (e) { fail(e); }
+    return;
+  }
+  if (t.id === "act-type") { S.act.type = t.value; return render(); }
+  if (t.id === "act-provider") { S.act.provider = t.value; return render(); }
+  if (t.id === "act-dismissed") { S.act.showDismissed = t.checked; return render(); }
+});
+let deb;
+document.addEventListener("input", ev => {
+  const t = ev.target;
+  if (t.id === "global-search") {
+    clearTimeout(deb);
+    deb = setTimeout(async () => {
+      const q = t.value.trim();
+      S.lib.q = q;
+      S.lib.ids = q ? new Set((await api(`/search?q=${encodeURIComponent(q)}&limit=500`)).items.map(c => c.id)) : null;
+      if (S.view !== "library") go("library"); else render();
+    }, 250);
+  }
+  if (t.id === "res-q") { clearTimeout(deb); deb = setTimeout(() => { S.res.q = t.value.trim(); render().then(() => { const i = $("#res-q"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }); }, 250); }
+  if (t.id === "act-q") { clearTimeout(deb); deb = setTimeout(() => { S.act.q = t.value.trim(); render().then(() => { const i = $("#act-q"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }); }, 250); }
+});
+// glisser-deposer du Kanban
+document.addEventListener("dragstart", ev => {
+  const c = ev.target.closest && ev.target.closest("[data-drag]");
+  if (!c) return;
+  ev.dataTransfer.setData("text/plain", c.dataset.drag); ev.dataTransfer.effectAllowed = "move";
+  c.classList.add("dragging");
+});
+document.addEventListener("dragend", ev => { const c = ev.target.closest && ev.target.closest("[data-drag]"); if (c) c.classList.remove("dragging"); $$(".col.over").forEach(x => x.classList.remove("over")); });
+document.addEventListener("dragover", ev => { const col = ev.target.closest && ev.target.closest("[data-drop]"); if (col) { ev.preventDefault(); $$(".col.over").forEach(x => x !== col && x.classList.remove("over")); col.classList.add("over"); } });
+document.addEventListener("drop", ev => {
+  const col = ev.target.closest && ev.target.closest("[data-drop]");
+  if (!col) return;
+  ev.preventDefault();
+  const id = +ev.dataTransfer.getData("text/plain");
+  if (id) setActionStatus(id, col.dataset.drop);
+});
+$("#scrim").addEventListener("click", closeDrawer);
+window.addEventListener("hashchange", () => go(location.hash.slice(1)));
+
+// ------------------------------------------------------------------ demarrage
+(async () => {
+  try {
+    [S.config] = await Promise.all([api("/config"), refreshStats(), loadConnectors()]);
+    await loadContents();
+    go(location.hash.slice(1) || "dashboard");
+  } catch (e) {
+    $("#view").innerHTML = `<div class="panel offline"><h3>API du Vault injoignable</h3>
+      <p class="muted">Cette interface lit et écrit dans vault.db via l'API locale. Lancez-la depuis le dossier reels-vault :</p>
+      <p><code>.venv\\Scripts\\python.exe vault_api.py</code></p><p class="muted">puis ouvrez <code>http://127.0.0.1:8765</code>.</p></div>`;
+  }
+})();
+</script>
+</body>
+</html>

@@ -17,3 +17,10 @@ test-liens.txt
 # Secrets / variables
 .env
 *.env
+# Base de donnees et exports du Vault (donnees personnelles)
+vault.db
+vault.db-journal
+exports/
+
+# Inbox mobile - données personnelles
+mobile-inbox/

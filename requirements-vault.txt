@@ -1,0 +1,5 @@
+# Dependances de la couche vault.db / API (installees dans .venv)
+# Le Vault (raw/, index.md, vault.html, migrate_to_db.py) fonctionne sans elles.
+fastapi
+uvicorn[standard]
+openpyxl    # optionnel : export Excel
