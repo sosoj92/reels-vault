@@ -352,6 +352,32 @@ class MistralWebResearchProvider:
                 "MISTRAL_API_KEY is not set. Do not paste the key into the Vault."
             )
 
+    def _pace(self):
+        if self.min_interval_seconds <= 0 or self._last_request_at <= 0:
+            return
+        elapsed = time.monotonic() - self._last_request_at
+        remaining = self.min_interval_seconds - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _retry_after(self, exc, attempt):
+        header = None
+        try:
+            header = exc.headers.get("Retry-After")
+        except Exception:
+            header = None
+
+        if header:
+            try:
+                return max(0.0, float(header))
+            except (TypeError, ValueError):
+                pass
+
+        return min(
+            self.max_backoff_seconds,
+            self.backoff_seconds * (2 ** attempt),
+        )
+
     def research_identity(self, item):
         payload = {
             "model": self.model,
@@ -375,16 +401,40 @@ class MistralWebResearchProvider:
             },
         )
 
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise ResearchError(
-                f"Mistral HTTP {exc.code}: {body[:500]}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise ResearchError(f"Mistral network error: {exc}") from exc
+        raw = None
+        transient_codes = {429, 500, 502, 503, 504}
+
+        for attempt in range(self.max_retries + 1):
+            self._pace()
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.timeout,
+                ) as response:
+                    raw = response.read().decode("utf-8")
+                self._last_request_at = time.monotonic()
+                break
+            except urllib.error.HTTPError as exc:
+                self._last_request_at = time.monotonic()
+                body = exc.read().decode("utf-8", errors="replace")
+
+                if exc.code in transient_codes and attempt < self.max_retries:
+                    time.sleep(self._retry_after(exc, attempt))
+                    continue
+
+                message = f"Mistral HTTP {exc.code}: {body[:500]}"
+                if exc.code == 429:
+                    raise ResearchRateLimitError(message) from exc
+                raise ResearchError(message) from exc
+            except urllib.error.URLError as exc:
+                self._last_request_at = time.monotonic()
+                if attempt < self.max_retries:
+                    time.sleep(self._retry_after(exc, attempt))
+                    continue
+                raise ResearchError(f"Mistral network error: {exc}") from exc
+
+        if raw is None:
+            raise ResearchError("Mistral request ended without a response")
 
         try:
             response_payload = json.loads(raw)
