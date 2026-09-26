@@ -40,7 +40,7 @@ from typing import Protocol
 import vault_intelligence as intelligence
 
 ANALYSIS_SCHEMA_VERSION = 2
-ANALYSIS_LOGIC_VERSION = "v4-grounded-summaries-claims-relations"
+ANALYSIS_LOGIC_VERSION = "v5-summary-from-grounded-claims"
 
 ALLOWED_RELATION_PREDICATES = {
     "uses",
@@ -423,7 +423,7 @@ UNCERTAINTY_CUES = (
 STRONG_CLAIM_CUE_GROUPS = {
     "requirement": (
         ("requires", "required", "must", "needs to", "need to", "necessary"),
-        ("require", "required", "must", "need", "necess", "requis", "doit", "oblig", "demande", "sans", "without"),
+        ("require", "required", "must", "need", "necess", "requis", "doit", "oblig", "demande"),
     ),
     "guarantee": (
         ("guarantees", "guarantee", "ensures", "ensure", "always", "never"),
@@ -472,25 +472,20 @@ def _claim_preserves_evidence_strength(claim_text, evidence):
     return True, None
 
 
-def _summary_preserves_source_uncertainty(summary, payload):
-    if not summary:
-        return True, None
-
-    source_text = "\n".join(
-        part
-        for part in (
-            payload.get("title"),
-            payload.get("description"),
-            payload.get("transcript"),
-        )
-        if part
-    )
-    source_uncertain = _contains_any(source_text, UNCERTAINTY_CUES)
-    summary_uncertain = _contains_any(summary, UNCERTAINTY_CUES)
-
-    if source_uncertain and not summary_uncertain:
-        return False, "summary_uncertainty_strengthened"
-    return True, None
+def _summary_from_grounded_claims(claims, max_claims=3):
+    """
+    Construit le resume actif uniquement a partir de claims deja filtres.
+    Le resume libre du provider reste conserve dans raw_result pour audit.
+    """
+    sentences = []
+    for item in claims[:max_claims]:
+        text = _clean_text(item.get("claim_text"), max_len=800)
+        if not text:
+            continue
+        if text[-1] not in ".!?":
+            text += "."
+        sentences.append(text)
+    return " ".join(sentences) or None
 
 
 def sanitize_result(payload, result):
@@ -506,21 +501,6 @@ def sanitize_result(payload, result):
     claims = []
     relations = []
     rejected = []
-
-    summary = _clean_text(result.summary, max_len=3000)
-    summary_ok, summary_reason = _summary_preserves_source_uncertainty(
-        summary,
-        payload,
-    )
-    if not summary_ok:
-        rejected.append(
-            {
-                "kind": "summary",
-                "reason": summary_reason,
-                "item": {"summary": summary},
-            }
-        )
-        summary = None
 
     for item in result.claims:
         if not isinstance(item, dict):
@@ -635,7 +615,7 @@ def sanitize_result(payload, result):
         )
 
     return AnalysisResult(
-        summary=summary,
+        summary=_summary_from_grounded_claims(claims),
         claims=claims,
         relations=relations,
     ), rejected
