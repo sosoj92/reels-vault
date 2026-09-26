@@ -15,8 +15,12 @@ Regles de securite epistemique :
 - les relations utilisent un vocabulaire controle ;
 - un fingerprint rend l'analyse idempotente tant que la source ne change pas.
 
-Mistral est le premier provider implemente, via /v1/chat/completions en JSON mode.
-Le coeur reste provider-agnostic.
+Providers :
+- Ollama/Qwen local = moteur par defaut, sans cout API ;
+- Gemini = fallback cloud optionnel si GEMINI_API_KEY est configuree ;
+- Mistral = provider explicite uniquement.
+
+Le coeur reste provider-agnostic et aucun fallback payant n'est silencieux.
 """
 
 import argparse
@@ -425,6 +429,239 @@ def sanitize_result(payload, result):
     ), rejected
 
 
+class OllamaAnalysisProvider:
+    """
+    Analyse locale via l'API Ollama.
+    Aucun secret n'est necessaire pour l'API locale.
+    """
+
+    name = "ollama"
+
+    def __init__(self, model=None, base_url=None, timeout=180):
+        self.model = model or os.environ.get(
+            "OLLAMA_ANALYSIS_MODEL",
+            "qwen3:4b",
+        )
+        self.base_url = (
+            base_url
+            or os.environ.get("OLLAMA_BASE_URL")
+            or "http://127.0.0.1:11434"
+        ).rstrip("/")
+        self.timeout = timeout
+
+    def analyze(self, payload):
+        body = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract structured knowledge from supplied source text. "
+                        "Never use outside knowledge. Return JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": build_analysis_prompt(payload),
+                },
+            ],
+            "format": "json",
+            "stream": False,
+            "options": {
+                "temperature": 0,
+            },
+        }
+
+        request = urllib.request.Request(
+            f"{self.base_url}/api/chat",
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace")
+            raise AnalysisError(
+                f"Ollama HTTP {exc.code}: {body_text[:500]}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise AnalysisError(
+                "Ollama local is unavailable. Start Ollama and make sure "
+                f"model {self.model!r} is installed."
+            ) from exc
+
+        try:
+            response = json.loads(raw)
+            content = response["message"]["content"]
+            data = json.loads(content)
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise AnalysisError("invalid Ollama JSON response") from exc
+
+        return _parse_result_object(data)
+
+
+class GeminiAnalysisProvider:
+    """
+    Fallback cloud optionnel. Il n'est utilise que si GEMINI_API_KEY existe
+    ou si --provider gemini est demande explicitement.
+    """
+
+    name = "gemini"
+
+    def __init__(self, api_key=None, model=None, timeout=90):
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.model = model or os.environ.get(
+            "GEMINI_ANALYSIS_MODEL",
+            "gemini-2.5-flash-lite",
+        )
+        self.timeout = timeout
+        self.max_retries = int(os.environ.get("GEMINI_ANALYSIS_MAX_RETRIES", "3"))
+        self.backoff_seconds = float(
+            os.environ.get("GEMINI_ANALYSIS_BACKOFF_SECONDS", "1")
+        )
+
+        if not self.api_key:
+            raise AnalysisError(
+                "GEMINI_API_KEY is not set. Configure it only if you want "
+                "Gemini as a cloud fallback."
+            )
+
+    def analyze(self, payload):
+        body = {
+            "system_instruction": {
+                "parts": [
+                    {
+                        "text": (
+                            "You extract structured knowledge from supplied source text. "
+                            "Never use outside knowledge. Return JSON only."
+                        )
+                    }
+                ]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": build_analysis_prompt(payload),
+                        }
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": 0,
+            },
+        }
+
+        model_path = urllib.parse.quote(self.model, safe="-_.")
+        request = urllib.request.Request(
+            (
+                "https://generativelanguage.googleapis.com/v1beta/"
+                f"models/{model_path}:generateContent"
+            ),
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={
+                "x-goog-api-key": self.api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+
+        raw = None
+        transient_codes = {429, 500, 502, 503, 504}
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.timeout,
+                ) as response:
+                    raw = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as exc:
+                body_text = exc.read().decode("utf-8", errors="replace")
+                if exc.code in transient_codes and attempt < self.max_retries:
+                    time.sleep(self.backoff_seconds * (2 ** attempt))
+                    continue
+                message = f"Gemini HTTP {exc.code}: {body_text[:500]}"
+                if exc.code == 429:
+                    raise AnalysisRateLimitError(message) from exc
+                raise AnalysisError(message) from exc
+            except urllib.error.URLError as exc:
+                if attempt < self.max_retries:
+                    time.sleep(self.backoff_seconds * (2 ** attempt))
+                    continue
+                raise AnalysisError(f"Gemini network error: {exc}") from exc
+
+        if raw is None:
+            raise AnalysisError("Gemini request ended without a response")
+
+        try:
+            response = json.loads(raw)
+            parts = response["candidates"][0]["content"]["parts"]
+            content = "".join(
+                part.get("text", "")
+                for part in parts
+                if isinstance(part, dict)
+            )
+            data = json.loads(content)
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise AnalysisError("invalid Gemini JSON response") from exc
+
+        return _parse_result_object(data)
+
+
+class AutoAnalysisProvider:
+    """
+    Routeur economique :
+    1) Ollama/Qwen local ;
+    2) Gemini uniquement si une cle est configuree ;
+    3) jamais de fallback Mistral implicite.
+
+    Le provider/model exposes apres analyse correspondent au moteur reel,
+    ce qui preserve correctement le cache et la provenance.
+    """
+
+    name = "auto"
+
+    def __init__(self):
+        self.providers = [OllamaAnalysisProvider()]
+        if os.environ.get("GEMINI_API_KEY"):
+            self.providers.append(GeminiAnalysisProvider())
+        self.model = "cost-router"
+        self.last_provider = None
+        self.last_model = None
+
+    def analyze(self, payload):
+        errors = []
+        for provider in self.providers:
+            try:
+                result = provider.analyze(payload)
+                self.last_provider = provider.name
+                self.last_model = provider.model
+                self.name = provider.name
+                self.model = provider.model
+                return result
+            except AnalysisRateLimitError as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
+            except AnalysisError as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
+
+        raise AnalysisError(
+            "No low-cost analysis provider is available. "
+            + " | ".join(errors)
+        )
+
+
 class MistralChatAnalysisProvider:
     name = "mistral"
 
@@ -536,6 +773,12 @@ class MistralChatAnalysisProvider:
 
 def provider_from_name(name):
     name = (name or "").strip().lower()
+    if name == "auto":
+        return AutoAnalysisProvider()
+    if name in ("ollama", "qwen", "local"):
+        return OllamaAnalysisProvider()
+    if name == "gemini":
+        return GeminiAnalysisProvider()
     if name == "mistral":
         return MistralChatAnalysisProvider()
     raise AnalysisError(f"unsupported analysis provider: {name!r}")
@@ -848,7 +1091,7 @@ def main():
     parser.add_argument("--db", required=True)
     parser.add_argument(
         "--provider",
-        default=os.environ.get("VAULT_ANALYSIS_PROVIDER", "mistral"),
+        default=os.environ.get("VAULT_ANALYSIS_PROVIDER", "auto"),
     )
 
     action = parser.add_mutually_exclusive_group(required=True)
