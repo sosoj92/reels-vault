@@ -438,7 +438,7 @@ class OllamaAnalysisProvider:
 
     name = "ollama"
 
-    def __init__(self, model=None, base_url=None, timeout=180):
+    def __init__(self, model=None, base_url=None, timeout=None):
         self.model = model or os.environ.get(
             "OLLAMA_ANALYSIS_MODEL",
             "qwen3:4b",
@@ -448,7 +448,14 @@ class OllamaAnalysisProvider:
             or os.environ.get("OLLAMA_BASE_URL")
             or "http://127.0.0.1:11434"
         ).rstrip("/")
-        self.timeout = timeout
+        self.timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(os.environ.get("OLLAMA_ANALYSIS_TIMEOUT", "600"))
+        )
+        self.max_chars = int(
+            os.environ.get("OLLAMA_ANALYSIS_MAX_CHARS", "8000")
+        )
 
     def analyze(self, payload):
         body = {
@@ -468,6 +475,8 @@ class OllamaAnalysisProvider:
             ],
             "format": "json",
             "stream": False,
+            "think": False,
+            "keep_alive": "10m",
             "options": {
                 "temperature": 0,
             },
@@ -491,7 +500,13 @@ class OllamaAnalysisProvider:
             raise AnalysisError(
                 f"Ollama HTTP {exc.code}: {body_text[:500]}"
             ) from exc
-        except urllib.error.URLError as exc:
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if isinstance(exc, TimeoutError):
+                raise AnalysisError(
+                    "Ollama timed out while analyzing this source. "
+                    f"Model={self.model!r}, timeout={self.timeout}s, "
+                    f"max_chars={self.max_chars}."
+                ) from exc
             raise AnalysisError(
                 "Ollama local is unavailable. Start Ollama and make sure "
                 f"model {self.model!r} is installed."
@@ -640,6 +655,10 @@ class AutoAnalysisProvider:
             if os.environ.get("GEMINI_API_KEY"):
                 self.providers.append(GeminiAnalysisProvider())
         self.model = "cost-router"
+        self.max_chars = min(
+            getattr(provider, "max_chars", 30000)
+            for provider in self.providers
+        ) if self.providers else 8000
         self.last_provider = None
         self.last_model = None
 
@@ -935,7 +954,11 @@ def _insert_relation(conn, source_id, item, analysis_id, provider):
 
 def analyze_source(conn, source_id, provider):
     ensure_analysis_schema(conn)
-    payload = source_payload(conn, source_id)
+    payload = source_payload(
+        conn,
+        source_id,
+        max_chars=getattr(provider, "max_chars", None),
+    )
     fingerprint = source_fingerprint(payload)
 
     existing = _existing_analysis(conn, source_id, fingerprint, provider)
@@ -1069,7 +1092,11 @@ def _candidate_source_ids(conn, provider, limit):
     selected = []
     for row in rows:
         source_id = row[0]
-        payload = source_payload(conn, source_id)
+        payload = source_payload(
+            conn,
+            source_id,
+            max_chars=getattr(provider, "max_chars", None),
+        )
         fingerprint = source_fingerprint(payload)
         if _existing_analysis(conn, source_id, fingerprint, provider):
             continue
