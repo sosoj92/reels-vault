@@ -147,7 +147,8 @@ def _fold(value):
 def _host(url):
     if not url:
         return None
-    return (urllib.parse.urlsplit(url).hostname or "").lower().lstrip("www.")
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
 
 
 def _same_host(a, b):
