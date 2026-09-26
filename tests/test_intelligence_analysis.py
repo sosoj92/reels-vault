@@ -19,6 +19,30 @@ class FakeAnalysisProvider:
         return self.result
 
 
+class FailingAnalysisProvider:
+    name = "failing"
+    model = "fail-model"
+
+    def analyze(self, payload):
+        raise analysis.AnalysisError("unavailable")
+
+
+class SuccessfulAnalysisProvider:
+    name = "success"
+    model = "success-model"
+
+    def __init__(self):
+        self.calls = 0
+
+    def analyze(self, payload):
+        self.calls += 1
+        return analysis.AnalysisResult(
+            summary="Local/fallback analysis worked.",
+            claims=[],
+            relations=[],
+        )
+
+
 class SourceAnalysisTests(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -236,6 +260,41 @@ class SourceAnalysisTests(unittest.TestCase):
         self.assertIn(notion, ids)
         self.assertIn(github, ids)
         self.assertNotIn(primary, ids)
+
+    def test_auto_router_falls_back_without_implicit_mistral(self):
+        success = SuccessfulAnalysisProvider()
+        router = analysis.AutoAnalysisProvider(
+            providers=[FailingAnalysisProvider(), success]
+        )
+        result = router.analyze({"title": "x"})
+
+        self.assertEqual(result.summary, "Local/fallback analysis worked.")
+        self.assertEqual(router.last_provider, "success")
+        self.assertEqual(router.last_model, "success-model")
+        self.assertEqual(success.calls, 1)
+
+    def test_auto_router_records_actual_execution_provider(self):
+        source_id, _, _ = self._source()
+        success = SuccessfulAnalysisProvider()
+        router = analysis.AutoAnalysisProvider(providers=[success])
+
+        result = analysis.analyze_source(self.conn, source_id, router)
+
+        self.assertEqual(result["status"], "completed")
+        stored = self.conn.execute(
+            "SELECT provider, model, raw_result FROM intelligence_source_analysis"
+        ).fetchone()
+        self.assertEqual(stored["provider"], "auto")
+        self.assertEqual(stored["model"], "cost-router")
+        raw = json.loads(stored["raw_result"])
+        self.assertEqual(raw["execution_provider"], "success")
+        self.assertEqual(raw["execution_model"], "success-model")
+
+    def test_provider_aliases_route_to_local_qwen(self):
+        for name in ("ollama", "qwen", "local"):
+            provider = analysis.provider_from_name(name)
+            self.assertIsInstance(provider, analysis.OllamaAnalysisProvider)
+            self.assertEqual(provider.model, "qwen3:4b")
 
     def test_fingerprint_changes_when_source_text_changes(self):
         source_id, _, _ = self._source()
