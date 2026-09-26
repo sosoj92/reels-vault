@@ -806,6 +806,14 @@ def _existing_analysis(conn, source_id, fingerprint, provider):
     return dict(row) if row else None
 
 
+def _execution_provider_name(provider):
+    return getattr(provider, "last_provider", None) or provider.name
+
+
+def _execution_model_name(provider):
+    return getattr(provider, "last_model", None) or getattr(provider, "model", None)
+
+
 def _existing_claim_id(conn, source_id, entity_id, claim_text):
     if entity_id is None:
         row = conn.execute(
@@ -849,7 +857,8 @@ def _insert_claim(conn, source_id, item, analysis_id, provider):
     stamp = intelligence.now()
     notes = json.dumps(
         {
-            "extracted_by": provider.name,
+            "extracted_by": _execution_provider_name(provider),
+            "analysis_model": _execution_model_name(provider),
             "analysis_id": analysis_id,
             "claim_type": item["claim_type"],
             "evidence": item.get("evidence"),
