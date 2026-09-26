@@ -432,8 +432,17 @@ STRONG_CLAIM_CUE_GROUPS = {
 
 
 def _contains_any(text, cues):
+    raw = (text or "").lower()
     folded = _fold_for_evidence(text)
-    return any(_fold_for_evidence(cue) in folded for cue in cues)
+    for cue in cues:
+        if cue == "~":
+            if "~" in raw:
+                return True
+            continue
+        folded_cue = _fold_for_evidence(cue)
+        if folded_cue and folded_cue in folded:
+            return True
+    return False
 
 
 def _claim_preserves_evidence_strength(claim_text, evidence):
