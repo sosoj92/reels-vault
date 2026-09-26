@@ -1,0 +1,874 @@
+#!/usr/bin/env python3
+"""
+vault_analysis.py - Analyse semantique des sources pour Life Intelligence V3.
+
+Cette couche transforme une source deja ingeree en intelligence exploitable :
+- un resume source-level ;
+- des claims ATTRIBUES a la source, jamais marques "verified" ici ;
+- des relations explicites entre des entites deja liees a cette source.
+
+Regles de securite epistemique :
+- aucune connaissance externe dans cette etape ;
+- aucune creation d'entite ;
+- aucun ID d'entite absent de la source ne peut etre ecrit ;
+- chaque claim extrait reste verification_status='asserted' ;
+- les relations utilisent un vocabulaire controle ;
+- un fingerprint rend l'analyse idempotente tant que la source ne change pas.
+
+Mistral est le premier provider implemente, via /v1/chat/completions en JSON mode.
+Le coeur reste provider-agnostic.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Protocol
+
+import vault_intelligence as intelligence
+
+ANALYSIS_SCHEMA_VERSION = 1
+
+ALLOWED_RELATION_PREDICATES = {
+    "uses",
+    "integrates_with",
+    "alternative_to",
+    "compares_with",
+    "depends_on",
+    "part_of",
+    "created_by",
+    "recommended_with",
+    "supports",
+    "replaces",
+    "connects_to",
+}
+
+ALLOWED_CLAIM_TYPES = {
+    "fact",
+    "capability",
+    "recommendation",
+    "comparison",
+    "pricing",
+    "requirement",
+    "limitation",
+    "other",
+}
+
+ANALYSIS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS intelligence_source_analysis (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id          INTEGER NOT NULL REFERENCES intelligence_sources(id) ON DELETE CASCADE,
+    source_fingerprint TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    model              TEXT,
+    summary            TEXT,
+    raw_result         TEXT NOT NULL DEFAULT '{}',
+    rejected_items     TEXT NOT NULL DEFAULT '[]',
+    created_at         TEXT NOT NULL,
+    UNIQUE (source_id, source_fingerprint, provider, model)
+);
+
+CREATE TABLE IF NOT EXISTS intelligence_analysis_claim_links (
+    analysis_id INTEGER NOT NULL REFERENCES intelligence_source_analysis(id) ON DELETE CASCADE,
+    claim_id    INTEGER NOT NULL REFERENCES intelligence_claims(id) ON DELETE CASCADE,
+    PRIMARY KEY (analysis_id, claim_id)
+);
+
+CREATE TABLE IF NOT EXISTS intelligence_analysis_relation_links (
+    analysis_id INTEGER NOT NULL REFERENCES intelligence_source_analysis(id) ON DELETE CASCADE,
+    relation_id INTEGER NOT NULL REFERENCES intelligence_relations(id) ON DELETE CASCADE,
+    PRIMARY KEY (analysis_id, relation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_analysis_source
+    ON intelligence_source_analysis(source_id);
+"""
+
+
+class AnalysisError(RuntimeError):
+    pass
+
+
+class AnalysisRateLimitError(AnalysisError):
+    pass
+
+
+@dataclass
+class AnalysisResult:
+    summary: str | None
+    claims: list[dict]
+    relations: list[dict]
+
+
+class AnalysisProvider(Protocol):
+    name: str
+    model: str | None
+
+    def analyze(self, payload: dict) -> AnalysisResult:
+        ...
+
+
+def ensure_analysis_schema(conn):
+    intelligence.ensure_schema(conn)
+    conn.executescript(ANALYSIS_SCHEMA)
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES ('analysis_schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(ANALYSIS_SCHEMA_VERSION),),
+    )
+    conn.commit()
+    return conn
+
+
+def _table_exists(conn, table):
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone() is not None
+
+
+def _effective_description(content):
+    return (
+        content.get("description_manual")
+        or content.get("description_ai")
+        or content.get("description_original")
+        or ""
+    ).strip()
+
+
+def _clean_text(value, max_len=None):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+    if max_len is not None:
+        value = value[:max_len]
+    return value
+
+
+def source_payload(conn, source_id, max_chars=None):
+    ensure_analysis_schema(conn)
+
+    source_row = conn.execute(
+        "SELECT * FROM intelligence_sources WHERE id = ?",
+        (source_id,),
+    ).fetchone()
+    if not source_row:
+        raise AnalysisError(f"source {source_id} not found")
+
+    source = dict(source_row)
+    content_id = source.get("content_id")
+    if content_id is None:
+        raise AnalysisError(
+            f"source {source_id} has no V2 content_id; semantic analysis requires source text"
+        )
+    if not _table_exists(conn, "contents"):
+        raise AnalysisError("V2 contents table not found")
+
+    content_row = conn.execute(
+        "SELECT * FROM contents WHERE id = ?",
+        (content_id,),
+    ).fetchone()
+    if not content_row:
+        raise AnalysisError(f"V2 content {content_id} not found")
+    content = dict(content_row)
+
+    entities = [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "entity_type": row["entity_type"],
+            "canonical_key": row["canonical_key"],
+        }
+        for row in conn.execute(
+            """
+            SELECT DISTINCT e.id, e.name, e.entity_type, e.canonical_key
+              FROM intelligence_entities e
+              JOIN intelligence_entity_sources es ON es.entity_id = e.id
+             WHERE es.source_id = ?
+               AND es.role <> 'primary'
+             ORDER BY e.id
+            """,
+            (source_id,),
+        ).fetchall()
+    ]
+
+    title = _clean_text(content.get("title")) or _clean_text(source.get("title"))
+    description = _effective_description(content)
+    transcript = _clean_text(content.get("transcript")) or ""
+
+    if max_chars is None:
+        max_chars = int(os.environ.get("VAULT_ANALYSIS_MAX_CHARS", "30000"))
+
+    # Le titre et la description sont petits et prioritaires.
+    # Le transcript prend le budget restant, sans jamais alterer la V2.
+    fixed = len(title or "") + len(description or "")
+    transcript_budget = max(0, max_chars - fixed)
+    transcript = transcript[:transcript_budget]
+
+    if not (title or description or transcript):
+        raise AnalysisError(f"source {source_id} has no analyzable text")
+
+    return {
+        "source_id": source_id,
+        "content_id": content_id,
+        "source_url": source.get("source_url"),
+        "platform": source.get("platform"),
+        "title": title,
+        "description": description,
+        "transcript": transcript,
+        "entities": entities,
+    }
+
+
+def source_fingerprint(payload):
+    stable = {
+        "source_id": payload["source_id"],
+        "title": payload.get("title"),
+        "description": payload.get("description"),
+        "transcript": payload.get("transcript"),
+        "entities": [
+            {
+                "id": entity["id"],
+                "name": entity["name"],
+                "entity_type": entity["entity_type"],
+                "canonical_key": entity["canonical_key"],
+            }
+            for entity in payload.get("entities", [])
+        ],
+    }
+    raw = json.dumps(
+        stable,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def build_analysis_prompt(payload):
+    entity_catalog = json.dumps(
+        payload.get("entities", []),
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    return f"""
+Analyze ONLY the source material below. Do not use external knowledge.
+
+SOURCE
+Title: {payload.get('title') or ''}
+Description:
+{payload.get('description') or ''}
+
+Transcript:
+{payload.get('transcript') or ''}
+
+ENTITIES ALREADY LINKED TO THIS SOURCE
+{entity_catalog}
+
+Return exactly one JSON object:
+{{
+  "summary": "2-5 sentence concrete summary" | null,
+  "claims": [
+    {{
+      "entity_id": integer | null,
+      "claim_type": "fact" | "capability" | "recommendation" | "comparison" |
+                    "pricing" | "requirement" | "limitation" | "other",
+      "claim_text": "short factual paraphrase of what THIS SOURCE says",
+      "evidence": "short excerpt from the supplied source material"
+    }}
+  ],
+  "relations": [
+    {{
+      "subject_entity_id": integer,
+      "predicate": "uses" | "integrates_with" | "alternative_to" |
+                   "compares_with" | "depends_on" | "part_of" | "created_by" |
+                   "recommended_with" | "supports" | "replaces" | "connects_to",
+      "object_entity_id": integer,
+      "evidence": "short excerpt from the supplied source material"
+    }}
+  ]
+}}
+
+Rules:
+- Claims are source assertions, NOT verified facts.
+- Extract only claims explicitly supported by the supplied text.
+- entity_id may be null for a general claim not attributable to one listed entity.
+- If entity_id is not null, it MUST be one of the listed entity IDs.
+- Relations may ONLY connect two listed entity IDs.
+- Never create or infer a new entity, company, person, product, URL, repository, or ID.
+- Do not create a relation just because two entities appear in the same source.
+- Keep evidence short and directly grounded in the supplied text.
+- If there is no supported claim or relation, return an empty array.
+- Output JSON only.
+""".strip()
+
+
+def _parse_result_object(data):
+    if not isinstance(data, dict):
+        raise AnalysisError("analysis response must be a JSON object")
+
+    claims = data.get("claims") or []
+    relations = data.get("relations") or []
+
+    if not isinstance(claims, list) or not isinstance(relations, list):
+        raise AnalysisError("claims and relations must be arrays")
+
+    return AnalysisResult(
+        summary=_clean_text(data.get("summary")),
+        claims=claims,
+        relations=relations,
+    )
+
+
+def sanitize_result(payload, result):
+    """
+    Filtre tout item qui depasse le perimetre de la source.
+    Les items rejetes sont conserves dans le journal d'analyse, mais jamais ecrits.
+    """
+    allowed_ids = {entity["id"] for entity in payload.get("entities", [])}
+    claims = []
+    relations = []
+    rejected = []
+
+    for item in result.claims:
+        if not isinstance(item, dict):
+            rejected.append({"kind": "claim", "reason": "not_object", "item": item})
+            continue
+
+        entity_id = item.get("entity_id")
+        if entity_id is not None and entity_id not in allowed_ids:
+            rejected.append(
+                {
+                    "kind": "claim",
+                    "reason": "entity_not_linked_to_source",
+                    "item": item,
+                }
+            )
+            continue
+
+        claim_type = _clean_text(item.get("claim_type")) or "other"
+        if claim_type not in ALLOWED_CLAIM_TYPES:
+            claim_type = "other"
+
+        claim_text = _clean_text(item.get("claim_text"), max_len=1200)
+        evidence = _clean_text(item.get("evidence"), max_len=500)
+        if not claim_text:
+            rejected.append(
+                {"kind": "claim", "reason": "missing_claim_text", "item": item}
+            )
+            continue
+
+        claims.append(
+            {
+                "entity_id": entity_id,
+                "claim_type": claim_type,
+                "claim_text": claim_text,
+                "evidence": evidence,
+            }
+        )
+
+    for item in result.relations:
+        if not isinstance(item, dict):
+            rejected.append(
+                {"kind": "relation", "reason": "not_object", "item": item}
+            )
+            continue
+
+        subject = item.get("subject_entity_id")
+        object_id = item.get("object_entity_id")
+        predicate = _clean_text(item.get("predicate"))
+
+        if subject not in allowed_ids or object_id not in allowed_ids:
+            rejected.append(
+                {
+                    "kind": "relation",
+                    "reason": "entity_not_linked_to_source",
+                    "item": item,
+                }
+            )
+            continue
+        if subject == object_id:
+            rejected.append(
+                {"kind": "relation", "reason": "self_relation", "item": item}
+            )
+            continue
+        if predicate not in ALLOWED_RELATION_PREDICATES:
+            rejected.append(
+                {
+                    "kind": "relation",
+                    "reason": "predicate_not_allowed",
+                    "item": item,
+                }
+            )
+            continue
+
+        relations.append(
+            {
+                "subject_entity_id": subject,
+                "predicate": predicate,
+                "object_entity_id": object_id,
+                "evidence": _clean_text(item.get("evidence"), max_len=500),
+            }
+        )
+
+    return AnalysisResult(
+        summary=_clean_text(result.summary, max_len=3000),
+        claims=claims,
+        relations=relations,
+    ), rejected
+
+
+class MistralChatAnalysisProvider:
+    name = "mistral"
+
+    def __init__(self, api_key=None, model=None, timeout=90):
+        self.api_key = api_key or os.environ.get("MISTRAL_API_KEY")
+        self.model = model or os.environ.get(
+            "MISTRAL_ANALYSIS_MODEL",
+            "mistral-medium-latest",
+        )
+        self.timeout = timeout
+        self.max_retries = int(os.environ.get("MISTRAL_ANALYSIS_MAX_RETRIES", "4"))
+        self.backoff_seconds = float(
+            os.environ.get("MISTRAL_ANALYSIS_BACKOFF_SECONDS", "1")
+        )
+        self.max_backoff_seconds = float(
+            os.environ.get("MISTRAL_ANALYSIS_MAX_BACKOFF_SECONDS", "20")
+        )
+
+        if not self.api_key:
+            raise AnalysisError(
+                "MISTRAL_API_KEY is not set. Do not paste the key into the Vault."
+            )
+
+    def _retry_after(self, exc, attempt):
+        try:
+            header = exc.headers.get("Retry-After")
+        except Exception:
+            header = None
+
+        if header:
+            try:
+                return max(0.0, float(header))
+            except (TypeError, ValueError):
+                pass
+
+        return min(
+            self.max_backoff_seconds,
+            self.backoff_seconds * (2 ** attempt),
+        )
+
+    def analyze(self, payload):
+        body = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract structured knowledge from supplied source text. "
+                        "Never use outside knowledge. Return JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": build_analysis_prompt(payload),
+                },
+            ],
+            "response_format": {"type": "json_object"},
+        }
+
+        request = urllib.request.Request(
+            "https://api.mistral.ai/v1/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+
+        transient_codes = {429, 500, 502, 503, 504}
+        raw = None
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.timeout,
+                ) as response:
+                    raw = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as exc:
+                body_text = exc.read().decode("utf-8", errors="replace")
+                if exc.code in transient_codes and attempt < self.max_retries:
+                    time.sleep(self._retry_after(exc, attempt))
+                    continue
+                message = f"Mistral HTTP {exc.code}: {body_text[:500]}"
+                if exc.code == 429:
+                    raise AnalysisRateLimitError(message) from exc
+                raise AnalysisError(message) from exc
+            except urllib.error.URLError as exc:
+                if attempt < self.max_retries:
+                    time.sleep(self._retry_after(exc, attempt))
+                    continue
+                raise AnalysisError(f"Mistral network error: {exc}") from exc
+
+        if raw is None:
+            raise AnalysisError("Mistral request ended without a response")
+
+        try:
+            response = json.loads(raw)
+            content = response["choices"][0]["message"]["content"]
+            data = json.loads(content)
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise AnalysisError("invalid Mistral JSON-mode response") from exc
+
+        return _parse_result_object(data)
+
+
+def provider_from_name(name):
+    name = (name or "").strip().lower()
+    if name == "mistral":
+        return MistralChatAnalysisProvider()
+    raise AnalysisError(f"unsupported analysis provider: {name!r}")
+
+
+def _existing_analysis(conn, source_id, fingerprint, provider):
+    row = conn.execute(
+        """
+        SELECT *
+          FROM intelligence_source_analysis
+         WHERE source_id = ?
+           AND source_fingerprint = ?
+           AND provider = ?
+           AND COALESCE(model, '') = COALESCE(?, '')
+        """,
+        (
+            source_id,
+            fingerprint,
+            provider.name,
+            getattr(provider, "model", None),
+        ),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _existing_claim_id(conn, source_id, entity_id, claim_text):
+    if entity_id is None:
+        row = conn.execute(
+            """
+            SELECT id
+              FROM intelligence_claims
+             WHERE source_id = ?
+               AND entity_id IS NULL
+               AND claim_text = ?
+             ORDER BY id
+             LIMIT 1
+            """,
+            (source_id, claim_text),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT id
+              FROM intelligence_claims
+             WHERE source_id = ?
+               AND entity_id = ?
+               AND claim_text = ?
+             ORDER BY id
+             LIMIT 1
+            """,
+            (source_id, entity_id, claim_text),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def _insert_claim(conn, source_id, item, analysis_id, provider):
+    existing = _existing_claim_id(
+        conn,
+        source_id,
+        item["entity_id"],
+        item["claim_text"],
+    )
+    if existing is not None:
+        return existing
+
+    stamp = intelligence.now()
+    notes = json.dumps(
+        {
+            "extracted_by": provider.name,
+            "analysis_id": analysis_id,
+            "claim_type": item["claim_type"],
+            "evidence": item.get("evidence"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+    cur = conn.execute(
+        """
+        INSERT INTO intelligence_claims(
+            entity_id, source_id, claim_text, verification_status,
+            verification_source_id, notes, verified_at, created_at, updated_at
+        ) VALUES (?, ?, ?, 'asserted', NULL, ?, NULL, ?, ?)
+        """,
+        (
+            item["entity_id"],
+            source_id,
+            item["claim_text"],
+            notes,
+            stamp,
+            stamp,
+        ),
+    )
+    return cur.lastrowid
+
+
+def _insert_relation(conn, source_id, item, analysis_id, provider):
+    notes = json.dumps(
+        {
+            "extracted_by": provider.name,
+            "analysis_id": analysis_id,
+            "evidence": item.get("evidence"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO intelligence_relations(
+            subject_entity_id, predicate, object_entity_id,
+            source_id, notes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item["subject_entity_id"],
+            item["predicate"],
+            item["object_entity_id"],
+            source_id,
+            notes,
+            intelligence.now(),
+        ),
+    )
+
+    row = conn.execute(
+        """
+        SELECT id
+          FROM intelligence_relations
+         WHERE subject_entity_id = ?
+           AND predicate = ?
+           AND object_entity_id = ?
+           AND COALESCE(source_id, 0) = COALESCE(?, 0)
+        """,
+        (
+            item["subject_entity_id"],
+            item["predicate"],
+            item["object_entity_id"],
+            source_id,
+        ),
+    ).fetchone()
+    return row[0]
+
+
+def analyze_source(conn, source_id, provider):
+    ensure_analysis_schema(conn)
+    payload = source_payload(conn, source_id)
+    fingerprint = source_fingerprint(payload)
+
+    existing = _existing_analysis(conn, source_id, fingerprint, provider)
+    if existing:
+        return {
+            "source_id": source_id,
+            "analysis_id": existing["id"],
+            "status": "cached",
+            "claims_written": 0,
+            "relations_written": 0,
+            "rejected_items": len(json.loads(existing["rejected_items"] or "[]")),
+        }
+
+    raw_result = provider.analyze(payload)
+    clean_result, rejected = sanitize_result(payload, raw_result)
+
+    try:
+        conn.execute("BEGIN")
+        cur = conn.execute(
+            """
+            INSERT INTO intelligence_source_analysis(
+                source_id, source_fingerprint, provider, model,
+                summary, raw_result, rejected_items, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id,
+                fingerprint,
+                provider.name,
+                getattr(provider, "model", None),
+                clean_result.summary,
+                json.dumps(
+                    {
+                        "summary": raw_result.summary,
+                        "claims": raw_result.claims,
+                        "relations": raw_result.relations,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                json.dumps(rejected, ensure_ascii=False, sort_keys=True),
+                intelligence.now(),
+            ),
+        )
+        analysis_id = cur.lastrowid
+
+        claim_ids = []
+        for item in clean_result.claims:
+            claim_id = _insert_claim(
+                conn,
+                source_id,
+                item,
+                analysis_id,
+                provider,
+            )
+            claim_ids.append(claim_id)
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO intelligence_analysis_claim_links(
+                    analysis_id, claim_id
+                ) VALUES (?, ?)
+                """,
+                (analysis_id, claim_id),
+            )
+
+        relation_ids = []
+        for item in clean_result.relations:
+            relation_id = _insert_relation(
+                conn,
+                source_id,
+                item,
+                analysis_id,
+                provider,
+            )
+            relation_ids.append(relation_id)
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO intelligence_analysis_relation_links(
+                    analysis_id, relation_id
+                ) VALUES (?, ?)
+                """,
+                (analysis_id, relation_id),
+            )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {
+        "source_id": source_id,
+        "analysis_id": analysis_id,
+        "status": "completed",
+        "summary": clean_result.summary,
+        "claims_written": len(claim_ids),
+        "relations_written": len(relation_ids),
+        "rejected_items": len(rejected),
+    }
+
+
+def _candidate_source_ids(conn, provider, limit):
+    ensure_analysis_schema(conn)
+
+    rows = conn.execute(
+        """
+        SELECT s.id
+          FROM intelligence_sources s
+          JOIN contents c ON c.id = s.content_id
+         WHERE s.content_id IS NOT NULL
+           AND (
+                NULLIF(TRIM(COALESCE(c.title, '')), '') IS NOT NULL
+                OR NULLIF(TRIM(COALESCE(c.description_manual, '')), '') IS NOT NULL
+                OR NULLIF(TRIM(COALESCE(c.description_ai, '')), '') IS NOT NULL
+                OR NULLIF(TRIM(COALESCE(c.description_original, '')), '') IS NOT NULL
+                OR NULLIF(TRIM(COALESCE(c.transcript, '')), '') IS NOT NULL
+           )
+         ORDER BY s.id
+        """
+    ).fetchall()
+
+    selected = []
+    for row in rows:
+        source_id = row[0]
+        payload = source_payload(conn, source_id)
+        fingerprint = source_fingerprint(payload)
+        if _existing_analysis(conn, source_id, fingerprint, provider):
+            continue
+        selected.append(source_id)
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
+def analyze_next(conn, provider, limit=1):
+    results = []
+    for source_id in _candidate_source_ids(conn, provider, limit):
+        try:
+            results.append(analyze_source(conn, source_id, provider))
+        except AnalysisRateLimitError as exc:
+            results.append(
+                {
+                    "source_id": source_id,
+                    "status": "error",
+                    "error": str(exc),
+                }
+            )
+            break
+        except Exception as exc:
+            results.append(
+                {
+                    "source_id": source_id,
+                    "status": "error",
+                    "error": str(exc),
+                }
+            )
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Analyse semantique Life Intelligence V3"
+    )
+    parser.add_argument("--db", required=True)
+    parser.add_argument(
+        "--provider",
+        default=os.environ.get("VAULT_ANALYSIS_PROVIDER", "mistral"),
+    )
+
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--source-id", type=int)
+    action.add_argument("--next", action="store_true")
+
+    parser.add_argument("--limit", type=int, default=1)
+    args = parser.parse_args()
+
+    provider = provider_from_name(args.provider)
+    conn = intelligence.connect(args.db)
+    try:
+        if args.source_id is not None:
+            result = analyze_source(conn, args.source_id, provider)
+        else:
+            result = analyze_next(conn, provider, limit=args.limit)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()
