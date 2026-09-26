@@ -29,6 +29,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
@@ -631,10 +632,13 @@ class AutoAnalysisProvider:
 
     name = "auto"
 
-    def __init__(self):
-        self.providers = [OllamaAnalysisProvider()]
-        if os.environ.get("GEMINI_API_KEY"):
-            self.providers.append(GeminiAnalysisProvider())
+    def __init__(self, providers=None):
+        if providers is not None:
+            self.providers = list(providers)
+        else:
+            self.providers = [OllamaAnalysisProvider()]
+            if os.environ.get("GEMINI_API_KEY"):
+                self.providers.append(GeminiAnalysisProvider())
         self.model = "cost-router"
         self.last_provider = None
         self.last_model = None
@@ -646,8 +650,6 @@ class AutoAnalysisProvider:
                 result = provider.analyze(payload)
                 self.last_provider = provider.name
                 self.last_model = provider.model
-                self.name = provider.name
-                self.model = provider.model
                 return result
             except AnalysisRateLimitError as exc:
                 errors.append(f"{provider.name}: {exc}")
@@ -961,6 +963,16 @@ def analyze_source(conn, source_id, provider):
                         "summary": raw_result.summary,
                         "claims": raw_result.claims,
                         "relations": raw_result.relations,
+                        "execution_provider": getattr(
+                            provider,
+                            "last_provider",
+                            provider.name,
+                        ),
+                        "execution_model": getattr(
+                            provider,
+                            "last_model",
+                            getattr(provider, "model", None),
+                        ),
                     },
                     ensure_ascii=False,
                     sort_keys=True,
