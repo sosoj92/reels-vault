@@ -197,6 +197,50 @@ class AutomaticResolutionTests(unittest.TestCase):
             "manual_or_external_confirmation_required",
         )
 
+    def test_primary_evidence_does_not_inflate_research_priority(self):
+        provisional = vi.upsert_entity(
+            self.conn,
+            entity_type="solution",
+            canonical_key="named:solution:notion",
+            name="Notion",
+            metadata={"needs_review": True},
+        )
+        self._link_resource(1, "Notion", None, provisional)
+
+        mention_a = vi.upsert_source(
+            self.conn,
+            source_url="https://example.com/mention-a",
+        )
+        mention_b = vi.upsert_source(
+            self.conn,
+            source_url="https://example.com/mention-b",
+        )
+        primary = vi.upsert_source(
+            self.conn,
+            source_url="https://www.notion.so/",
+            source_type="primary_identity_source",
+        )
+        vi.link_entity_source(
+            self.conn,
+            entity_id=provisional,
+            source_id=mention_a,
+        )
+        vi.link_entity_source(
+            self.conn,
+            entity_id=provisional,
+            source_id=mention_b,
+        )
+        vi.link_entity_source(
+            self.conn,
+            entity_id=provisional,
+            source_id=primary,
+            role="primary",
+        )
+
+        queue = resolution.research_queue(self.conn)
+        item = next(x for x in queue if x["entity_id"] == provisional)
+        self.assertEqual(item["source_count"], 2)
+
     def test_unmatched_entity_goes_to_primary_source_research_queue(self):
         provisional = vi.upsert_entity(
             self.conn,
