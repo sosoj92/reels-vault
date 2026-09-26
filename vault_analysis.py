@@ -422,7 +422,7 @@ UNCERTAINTY_CUES = (
 STRONG_CLAIM_CUE_GROUPS = {
     "requirement": (
         ("requires", "required", "must", "needs to", "need to", "necessary"),
-        ("require", "required", "must", "need", "necess", "requis", "doit", "oblig"),
+        ("require", "required", "must", "need", "necess", "requis", "doit", "oblig", "demande", "sans", "without"),
     ),
     "guarantee": (
         ("guarantees", "guarantee", "ensures", "ensure", "always", "never"),
