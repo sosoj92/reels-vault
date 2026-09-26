@@ -56,6 +56,24 @@ RESOURCE_ENTITY_TYPES = {
     "autre": "other",
 }
 
+# Pour les ressources sans URL, le type V2 n'est pas assez fiable pour faire
+# partie seul de l'identite. "Notion [outil]" et "Notion [logiciel]" doivent
+# pouvoir converger. En revanche, on evite de fusionner un lieu, une personne
+# ou un livre homonyme avec une solution numerique.
+NAME_IDENTITY_GROUPS = {
+    "tool": "solution",
+    "software": "solution",
+    "app": "solution",
+    "website": "solution",
+    "service": "solution",
+    "person": "person",
+    "place": "place",
+    "book": "book",
+    "training": "training",
+    "method": "method",
+    "other": "other",
+}
+
 
 def _fold(value):
     value = unicodedata.normalize("NFD", value or "")
@@ -149,12 +167,13 @@ def resource_identity(resource):
             "github": None,
         }
 
+    identity_group = NAME_IDENTITY_GROUPS.get(entity_type, "other")
     return {
         "entity_type": entity_type,
-        "canonical_key": f"named:{entity_type}:{_slug(name)}",
+        "canonical_key": f"named:{identity_group}:{_slug(name)}",
         "name": name,
         "url": None,
-        "identity_basis": "name_type",
+        "identity_basis": "name_group",
         "needs_review": True,
         "github": None,
     }
