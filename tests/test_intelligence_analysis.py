@@ -295,6 +295,13 @@ class SourceAnalysisTests(unittest.TestCase):
             provider = analysis.provider_from_name(name)
             self.assertIsInstance(provider, analysis.OllamaAnalysisProvider)
             self.assertEqual(provider.model, "qwen3:4b")
+            self.assertEqual(provider.max_chars, 8000)
+            self.assertEqual(provider.timeout, 600.0)
+
+    def test_auto_router_uses_local_text_budget(self):
+        local = analysis.OllamaAnalysisProvider(timeout=10)
+        router = analysis.AutoAnalysisProvider(providers=[local])
+        self.assertEqual(router.max_chars, 8000)
 
     def test_fingerprint_changes_when_source_text_changes(self):
         source_id, _, _ = self._source()
