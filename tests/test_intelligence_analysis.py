@@ -240,6 +240,109 @@ class SourceAnalysisTests(unittest.TestCase):
             details["relations"][0]["evidence"],
         )
 
+    def test_relation_requires_evidence_naming_both_entities(self):
+        source_id, notion, github = self._source()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="Demo",
+                claims=[],
+                relations=[
+                    {
+                        "subject_entity_id": notion,
+                        "predicate": "alternative_to",
+                        "object_entity_id": github,
+                        "evidence": "the page shows alternatives",
+                    }
+                ],
+            )
+        )
+
+        result = analysis.analyze_source(self.conn, source_id, provider)
+
+        self.assertEqual(result["relations_written"], 0)
+        self.assertEqual(result["rejected_items"], 1)
+        stored = self.conn.execute(
+            "SELECT rejected_items FROM intelligence_source_analysis"
+        ).fetchone()
+        rejected = json.loads(stored[0])
+        self.assertEqual(
+            rejected[0]["reason"],
+            "evidence_does_not_name_both_entities",
+        )
+
+    def test_new_analysis_supersedes_old_automatic_artifacts(self):
+        source_id, notion, github = self._source()
+
+        first_provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="First",
+                claims=[
+                    {
+                        "entity_id": notion,
+                        "claim_type": "fact",
+                        "claim_text": "Old claim.",
+                        "evidence": "Notion old claim.",
+                    }
+                ],
+                relations=[
+                    {
+                        "subject_entity_id": notion,
+                        "predicate": "integrates_with",
+                        "object_entity_id": github,
+                        "evidence": "Notion integrates with GitHub.",
+                    }
+                ],
+            )
+        )
+        first = analysis.analyze_source(
+            self.conn,
+            source_id,
+            first_provider,
+        )
+
+        self.conn.execute(
+            "UPDATE contents SET transcript = ? WHERE id = 1",
+            ("Notion and GitHub are both mentioned, but no relation is stated.",),
+        )
+        self.conn.commit()
+
+        second_provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="Second",
+                claims=[],
+                relations=[],
+            )
+        )
+        second = analysis.analyze_source(
+            self.conn,
+            source_id,
+            second_provider,
+        )
+
+        self.assertNotEqual(first["analysis_id"], second["analysis_id"])
+        old = self.conn.execute(
+            """
+            SELECT superseded_at
+              FROM intelligence_source_analysis
+             WHERE id = ?
+            """,
+            (first["analysis_id"],),
+        ).fetchone()
+        self.assertIsNotNone(old[0])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM intelligence_claims"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM intelligence_relations"
+            ).fetchone()[0],
+            0,
+        )
+
     def test_unlinked_entity_and_invalid_predicate_are_rejected(self):
         source_id, notion, github = self._source()
 
