@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -64,6 +65,11 @@ CREATE INDEX IF NOT EXISTS idx_research_findings_status
 
 
 class ResearchError(RuntimeError):
+    pass
+
+
+class ResearchRateLimitError(ResearchError):
+    """Rate limit persistant apres les retries du provider."""
     pass
 
 
@@ -225,6 +231,12 @@ Rules:
 - status="resolved" only if the identity is unambiguous from an official source.
 - canonical_url must be the official homepage or official canonical repository URL.
 - primary_source_url must be an official first-party URL supporting that identity.
+- If canonical_url is on an official website, primary_source_url MUST be that same
+  URL or another official page on the SAME HOSTNAME whenever such a page exists.
+- Do not use a GitHub repository as primary_source_url when an official website
+  page on the canonical hostname already supports the identity.
+- Use an official repository as canonical_url/primary_source_url when the entity
+  itself is specifically a repository, or when no first-party website exists.
 - Include the exact vault name in aliases if the official canonical name differs.
 - If multiple plausible entities share the name, return ambiguous.
 - Never invent an URL, company, person, repository, product, or alias.
@@ -329,6 +341,11 @@ class MistralWebResearchProvider:
             "mistral-medium-latest",
         )
         self.timeout = timeout
+        self.max_retries = int(os.environ.get("MISTRAL_RESEARCH_MAX_RETRIES", "5"))
+        self.backoff_seconds = float(os.environ.get("MISTRAL_RESEARCH_BACKOFF_SECONDS", "1"))
+        self.max_backoff_seconds = float(os.environ.get("MISTRAL_RESEARCH_MAX_BACKOFF_SECONDS", "30"))
+        self.min_interval_seconds = float(os.environ.get("MISTRAL_RESEARCH_MIN_INTERVAL_SECONDS", "1"))
+        self._last_request_at = 0.0
 
         if not self.api_key:
             raise ResearchError(
