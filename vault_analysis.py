@@ -1069,6 +1069,95 @@ def analyze_source(conn, source_id, provider):
     }
 
 
+def analysis_details(conn, analysis_id):
+    """Retourne une vue lisible d'une analyse, avec noms d'entites et preuves."""
+    ensure_analysis_schema(conn)
+
+    row = conn.execute(
+        "SELECT * FROM intelligence_source_analysis WHERE id = ?",
+        (analysis_id,),
+    ).fetchone()
+    if not row:
+        raise AnalysisError(f"analysis {analysis_id} not found")
+
+    analysis_row = dict(row)
+    raw = json.loads(analysis_row["raw_result"] or "{}")
+
+    claims = []
+    for claim_row in conn.execute(
+        """
+        SELECT c.*, e.name AS entity_name
+          FROM intelligence_analysis_claim_links l
+          JOIN intelligence_claims c ON c.id = l.claim_id
+          LEFT JOIN intelligence_entities e ON e.id = c.entity_id
+         WHERE l.analysis_id = ?
+         ORDER BY c.id
+        """,
+        (analysis_id,),
+    ).fetchall():
+        claim = dict(claim_row)
+        notes = json.loads(claim.get("notes") or "{}")
+        claims.append(
+            {
+                "id": claim["id"],
+                "entity_id": claim["entity_id"],
+                "entity_name": claim.get("entity_name"),
+                "claim_type": notes.get("claim_type"),
+                "claim_text": claim["claim_text"],
+                "evidence": notes.get("evidence"),
+                "verification_status": claim["verification_status"],
+            }
+        )
+
+    relations = []
+    for relation_row in conn.execute(
+        """
+        SELECT r.*,
+               s.name AS subject_name,
+               o.name AS object_name
+          FROM intelligence_analysis_relation_links l
+          JOIN intelligence_relations r ON r.id = l.relation_id
+          JOIN intelligence_entities s ON s.id = r.subject_entity_id
+          JOIN intelligence_entities o ON o.id = r.object_entity_id
+         WHERE l.analysis_id = ?
+         ORDER BY r.id
+        """,
+        (analysis_id,),
+    ).fetchall():
+        relation = dict(relation_row)
+        notes = json.loads(relation.get("notes") or "{}")
+        relations.append(
+            {
+                "id": relation["id"],
+                "subject_entity_id": relation["subject_entity_id"],
+                "subject_name": relation["subject_name"],
+                "predicate": relation["predicate"],
+                "object_entity_id": relation["object_entity_id"],
+                "object_name": relation["object_name"],
+                "evidence": notes.get("evidence"),
+            }
+        )
+
+    return {
+        "analysis_id": analysis_id,
+        "source_id": analysis_row["source_id"],
+        "provider": analysis_row["provider"],
+        "model": analysis_row["model"],
+        "execution_provider": raw.get(
+            "execution_provider",
+            analysis_row["provider"],
+        ),
+        "execution_model": raw.get(
+            "execution_model",
+            analysis_row["model"],
+        ),
+        "summary": analysis_row["summary"],
+        "claims": claims,
+        "relations": relations,
+        "rejected_items": json.loads(analysis_row["rejected_items"] or "[]"),
+    }
+
+
 def _candidate_source_ids(conn, provider, limit):
     ensure_analysis_schema(conn)
 
@@ -1145,17 +1234,21 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--source-id", type=int)
     action.add_argument("--next", action="store_true")
+    action.add_argument("--show-analysis", type=int)
 
     parser.add_argument("--limit", type=int, default=1)
     args = parser.parse_args()
 
-    provider = provider_from_name(args.provider)
     conn = intelligence.connect(args.db)
     try:
-        if args.source_id is not None:
-            result = analyze_source(conn, args.source_id, provider)
+        if args.show_analysis is not None:
+            result = analysis_details(conn, args.show_analysis)
         else:
-            result = analyze_next(conn, provider, limit=args.limit)
+            provider = provider_from_name(args.provider)
+            if args.source_id is not None:
+                result = analyze_source(conn, args.source_id, provider)
+            else:
+                result = analyze_next(conn, provider, limit=args.limit)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         conn.close()
