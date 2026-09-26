@@ -221,7 +221,10 @@ class SourceAnalysisTests(unittest.TestCase):
             created["analysis_id"],
         )
 
-        self.assertEqual(details["summary"], "Reviewable analysis.")
+        self.assertEqual(
+            details["summary"],
+            "The creator recommends Notion.",
+        )
         self.assertEqual(details["claims"][0]["entity_name"], "Notion")
         self.assertEqual(
             details["claims"][0]["verification_status"],
