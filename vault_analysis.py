@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 import unicodedata
 import urllib.error
@@ -39,7 +40,7 @@ from typing import Protocol
 import vault_intelligence as intelligence
 
 ANALYSIS_SCHEMA_VERSION = 2
-ANALYSIS_LOGIC_VERSION = "v2-grounded-relations"
+ANALYSIS_LOGIC_VERSION = "v3-grounded-claims-and-relations"
 
 ALLOWED_RELATION_PREDICATES = {
     "uses",
@@ -321,6 +322,15 @@ Return exactly one JSON object:
 Rules:
 - Claims are source assertions, NOT verified facts.
 - Extract only claims explicitly supported by the supplied text.
+- Preserve modality and uncertainty exactly. Never strengthen "aims to", "may",
+  "might", "likely", "probably", "approximately", "~", "appears", "suggests",
+  "vise à", "peut", "pourrait", "probablement", "environ", or similar wording
+  into a certain statement.
+- Never convert a descriptive attribute into a requirement. Example: "the repo
+  has 230 stars" does NOT mean "the skill requires a repo with 230 stars".
+- Never introduce "requires", "must", "guarantees", "ensures", "always",
+  "never", or equivalent certainty unless the supplied evidence explicitly
+  supports that strength.
 - entity_id may be null for a general claim not attributable to one listed entity.
 - If entity_id is not null, it MUST be one of the listed entity IDs.
 - Relations may ONLY connect two listed entity IDs.
@@ -381,6 +391,70 @@ def _evidence_names_both_entities(evidence, subject_name, object_name):
     )
 
 
+UNCERTAINTY_CUES = (
+    "~",
+    "approximately",
+    "approx",
+    "about",
+    "around",
+    "aim",
+    "aims",
+    "target",
+    "targets",
+    "likely",
+    "probably",
+    "possibly",
+    "may",
+    "might",
+    "could",
+    "appears",
+    "seems",
+    "suggests",
+    "environ",
+    "approximativement",
+    "vise",
+    "probablement",
+    "peut",
+    "pourrait",
+    "semble",
+)
+
+STRONG_CLAIM_CUE_GROUPS = {
+    "requirement": (
+        ("requires", "required", "must", "needs to", "need to", "necessary"),
+        ("require", "required", "must", "need", "necess", "requis", "doit", "oblig"),
+    ),
+    "guarantee": (
+        ("guarantees", "guarantee", "ensures", "ensure", "always", "never"),
+        ("guarantee", "ensure", "always", "never", "garant", "toujours", "jamais"),
+    ),
+}
+
+
+def _contains_any(text, cues):
+    folded = _fold_for_evidence(text)
+    return any(_fold_for_evidence(cue) in folded for cue in cues)
+
+
+def _claim_preserves_evidence_strength(claim_text, evidence):
+    if not evidence:
+        return False, "missing_evidence"
+
+    evidence_uncertain = _contains_any(evidence, UNCERTAINTY_CUES)
+    claim_uncertain = _contains_any(claim_text, UNCERTAINTY_CUES)
+    if evidence_uncertain and not claim_uncertain:
+        return False, "uncertainty_strengthened"
+
+    for label, (claim_cues, evidence_cues) in STRONG_CLAIM_CUE_GROUPS.items():
+        if _contains_any(claim_text, claim_cues) and not _contains_any(
+            evidence,
+            evidence_cues,
+        ):
+            return False, f"unsupported_{label}"
+
+    return True, None
+
+
 def sanitize_result(payload, result):
     """
     Filtre tout item qui depasse le perimetre de la source.
@@ -420,6 +494,20 @@ def sanitize_result(payload, result):
         if not claim_text:
             rejected.append(
                 {"kind": "claim", "reason": "missing_claim_text", "item": item}
+            )
+            continue
+
+        grounded, grounding_reason = _claim_preserves_evidence_strength(
+            claim_text,
+            evidence,
+        )
+        if not grounded:
+            rejected.append(
+                {
+                    "kind": "claim",
+                    "reason": grounding_reason,
+                    "item": item,
+                }
             )
             continue
 
@@ -1402,12 +1490,38 @@ def _candidate_source_ids(conn, provider, limit):
     return selected
 
 
-def analyze_next(conn, provider, limit=1):
+def analyze_next(conn, provider, limit=1, progress=False):
     results = []
-    for source_id in _candidate_source_ids(conn, provider, limit):
+    source_ids = _candidate_source_ids(conn, provider, limit)
+    total = len(source_ids)
+    for index, source_id in enumerate(source_ids, start=1):
+        started = time.monotonic()
+        if progress:
+            print(
+                f"[{index}/{total}] Source {source_id} : analyse en cours...",
+                file=sys.stderr,
+                flush=True,
+            )
         try:
-            results.append(analyze_source(conn, source_id, provider))
+            result = analyze_source(conn, source_id, provider)
+            results.append(result)
+            if progress:
+                elapsed = time.monotonic() - started
+                print(
+                    f"[{index}/{total}] Source {source_id} : "
+                    f"{result.get('status')} en {elapsed:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
         except AnalysisRateLimitError as exc:
+            if progress:
+                elapsed = time.monotonic() - started
+                print(
+                    f"[{index}/{total}] Source {source_id} : erreur en "
+                    f"{elapsed:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
             results.append(
                 {
                     "source_id": source_id,
@@ -1417,6 +1531,14 @@ def analyze_next(conn, provider, limit=1):
             )
             break
         except Exception as exc:
+            if progress:
+                elapsed = time.monotonic() - started
+                print(
+                    f"[{index}/{total}] Source {source_id} : erreur en "
+                    f"{elapsed:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
             results.append(
                 {
                     "source_id": source_id,
@@ -1454,7 +1576,12 @@ def main():
             if args.source_id is not None:
                 result = analyze_source(conn, args.source_id, provider)
             else:
-                result = analyze_next(conn, provider, limit=args.limit)
+                result = analyze_next(
+                    conn,
+                    provider,
+                    limit=args.limit,
+                    progress=True,
+                )
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         conn.close()
