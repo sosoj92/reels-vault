@@ -55,6 +55,7 @@ def audit(conn, top=10):
                COUNT(DISTINCT es.source_id) AS source_count
           FROM intelligence_entities e
           JOIN intelligence_entity_sources es ON es.entity_id = e.id
+         WHERE es.role <> 'primary'
          GROUP BY e.id
         HAVING COUNT(DISTINCT es.source_id) > 1
          ORDER BY source_count DESC, e.name COLLATE NOCASE
@@ -86,6 +87,7 @@ def audit(conn, top=10):
               FROM (
                     SELECT entity_id
                       FROM intelligence_entity_sources
+                     WHERE role <> 'primary'
                      GROUP BY entity_id
                     HAVING COUNT(DISTINCT source_id) > 1
               )
