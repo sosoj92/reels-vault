@@ -240,6 +240,91 @@ class SourceAnalysisTests(unittest.TestCase):
             details["relations"][0]["evidence"],
         )
 
+    def test_claim_rejects_invented_requirement(self):
+        source_id, notion, _ = self._source()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="Demo",
+                claims=[
+                    {
+                        "entity_id": notion,
+                        "claim_type": "requirement",
+                        "claim_text": "Notion requires a repository with 230 stars.",
+                        "evidence": "The repository has more than 230 stars.",
+                    }
+                ],
+                relations=[],
+            )
+        )
+
+        result = analysis.analyze_source(self.conn, source_id, provider)
+
+        self.assertEqual(result["claims_written"], 0)
+        self.assertEqual(result["rejected_items"], 1)
+        stored = self.conn.execute(
+            "SELECT rejected_items FROM intelligence_source_analysis"
+        ).fetchone()
+        rejected = json.loads(stored[0])
+        self.assertEqual(
+            rejected[0]["reason"],
+            "unsupported_requirement",
+        )
+
+    def test_claim_preserves_uncertainty(self):
+        source_id, notion, _ = self._source()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="Demo",
+                claims=[
+                    {
+                        "entity_id": notion,
+                        "claim_type": "capability",
+                        "claim_text": "Notion passes five AI detectors.",
+                        "evidence": "Notion vise à passer 5 détecteurs d'IA.",
+                    }
+                ],
+                relations=[],
+            )
+        )
+
+        result = analysis.analyze_source(self.conn, source_id, provider)
+
+        self.assertEqual(result["claims_written"], 0)
+        self.assertEqual(result["rejected_items"], 1)
+        stored = self.conn.execute(
+            "SELECT rejected_items FROM intelligence_source_analysis"
+        ).fetchone()
+        rejected = json.loads(stored[0])
+        self.assertEqual(
+            rejected[0]["reason"],
+            "uncertainty_strengthened",
+        )
+
+    def test_claim_keeps_matching_uncertainty(self):
+        source_id, notion, _ = self._source()
+
+        provider = FakeAnalysisProvider(
+            analysis.AnalysisResult(
+                summary="Demo",
+                claims=[
+                    {
+                        "entity_id": notion,
+                        "claim_type": "fact",
+                        "claim_text": "Notion likely refers to the intended product.",
+                        "evidence": "Notion est probablement le produit visé.",
+                    }
+                ],
+                relations=[],
+            )
+        )
+
+        result = analysis.analyze_source(self.conn, source_id, provider)
+
+        self.assertEqual(result["claims_written"], 1)
+        self.assertEqual(result["rejected_items"], 0)
+
     def test_relation_requires_evidence_naming_both_entities(self):
         source_id, notion, github = self._source()
 
