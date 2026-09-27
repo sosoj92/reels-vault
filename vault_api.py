@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 import connectors
 import vault_db
 import vault_intelligence as intelligence
+import vault_intelligence_context as intelligence_context
 import vault_intelligence_query as intelligence_query
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("REELS_VAULT_PORT", 8765))
@@ -78,6 +79,11 @@ def _connector_error(_, exc):
 @app.exception_handler(intelligence_query.IntelligenceQueryError)
 def _intelligence_query_error(_, exc):
     return JSONResponse(status_code=422, content={"error": "invalid_query", "detail": str(exc)})
+
+
+@app.exception_handler(intelligence_context.IntelligenceContextError)
+def _intelligence_context_error(_, exc):
+    return JSONResponse(status_code=422, content={"error": "invalid_context_query", "detail": str(exc)})
 
 
 # ------------------------------------------------------------------ modeles
@@ -260,6 +266,29 @@ def intelligence_entity(entity_id: int, conn=Depends(db)):
     if item is None:
         raise HTTPException(status_code=404, detail=f"intelligence entity {entity_id} not found")
     return item
+
+
+@app.get(
+    "/intelligence/context",
+    tags=["intelligence"],
+    summary="Paquet de contexte borne et probant pour l'Assistant IA",
+)
+def intelligence_context_pack(
+    q: str = Query(..., min_length=1, max_length=500),
+    entity_limit: int = Query(6, ge=1, le=20),
+    claims_per_entity: int = Query(6, ge=1, le=20),
+    sources_per_entity: int = Query(4, ge=1, le=20),
+    relations_per_entity: int = Query(6, ge=1, le=20),
+    conn=Depends(db),
+):
+    return intelligence_context.build_context_pack(
+        conn,
+        q,
+        entity_limit=entity_limit,
+        claims_per_entity=claims_per_entity,
+        sources_per_entity=sources_per_entity,
+        relations_per_entity=relations_per_entity,
+    )
 
 
 # ------------------------------------------------------------------ contenus
