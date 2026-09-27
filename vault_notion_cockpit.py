@@ -200,6 +200,7 @@ def build_projection(conn):
                     if signal
                     else action.get("content_source_url")
                 ),
+                "action_status": status,
             }
         )
 
@@ -246,6 +247,10 @@ def _payload(row):
         properties["Source"] = {"url": row["source"]}
     else:
         properties["Source"] = {"url": None}
+    if row.get("action_status"):
+        properties["Action status"] = {
+            "select": {"name": row["action_status"]}
+        }
     return properties
 
 
@@ -323,6 +328,15 @@ class NotionCockpitClient:
             {"properties": properties},
         )
 
+    def get_page(self, page_id):
+        return self._request("GET", f"/pages/{page_id}")
+
+    def clear_decision(self, page_id):
+        return self.update_page(
+            page_id,
+            {"Décision": {"select": None}},
+        )
+
 
 def _existing_link(conn, vault_ref):
     row = conn.execute(
@@ -357,6 +371,81 @@ def _record_link(conn, vault_ref, page, payload_hash):
         ),
     )
     conn.commit()
+
+
+def apply_notion_decisions(conn, client):
+    """
+    Lit uniquement la propriete Notion 'Décision' des actions déjà liées.
+
+    Sécurité :
+    - aucune autre propriété Notion n'est importée ;
+    - seules les actions encore 'proposed' peuvent être approuvées/ignorées ;
+    - après traitement, la Décision est effacée côté Notion ;
+    - l'état officiel reste stocké dans vault.db.
+    """
+    ensure_schema(conn)
+    intelligence_actions.ensure_schema(conn)
+
+    rows = conn.execute(
+        """
+        SELECT
+            l.vault_ref,
+            l.notion_page_id,
+            sa.action_id
+          FROM intelligence_cockpit_links l
+          JOIN intelligence_signal_actions sa
+            ON l.vault_ref = ('signal:' || sa.signal_key)
+         ORDER BY sa.action_id
+        """
+    ).fetchall()
+
+    result = {
+        "approved": 0,
+        "dismissed": 0,
+        "ignored": 0,
+        "checked": 0,
+    }
+
+    for row in rows:
+        item = dict(row)
+        page = client.get_page(item["notion_page_id"])
+        result["checked"] += 1
+
+        decision = (
+            ((page.get("properties") or {}).get("Décision") or {})
+            .get("select")
+        )
+        decision_name = decision.get("name") if decision else None
+        if not decision_name:
+            continue
+
+        action = vault_db.get_action(conn, item["action_id"])
+        if action["status"] != "proposed":
+            client.clear_decision(item["notion_page_id"])
+            result["ignored"] += 1
+            continue
+
+        if decision_name == "✅ Approuver":
+            vault_db.set_action_status(
+                conn,
+                item["action_id"],
+                "approved",
+            )
+            result["approved"] += 1
+        elif decision_name == "⛔ Ignorer":
+            vault_db.set_action_status(
+                conn,
+                item["action_id"],
+                "dismissed",
+            )
+            result["dismissed"] += 1
+        else:
+            result["ignored"] += 1
+            continue
+
+        client.clear_decision(item["notion_page_id"])
+
+    return result
 
 
 def sync_projection(conn, client):
