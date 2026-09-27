@@ -1,6 +1,6 @@
 # Upstream integrations
 
-This project deliberately keeps two public repositories as upstream inputs rather
+This project deliberately keeps three public repositories as upstream inputs rather
 than copying them wholesale into the private Vault repository.
 
 ## 1. sosoj92/reels-vault
@@ -55,11 +55,41 @@ Examples especially relevant to this project include:
 - Minimal Change Engineer
 - Code Reviewer
 
+## 3. sosoj92/jarvis-assistant-vocal
+
+Role: orchestration, permissions and execution-pattern reference.
+
+The Jarvis repository contributes architectural patterns that are directly useful
+to the Life Intelligence System:
+- separate fast execution from slower background reasoning;
+- keep the execution layer ("keys and body") distinct from the reasoning layer;
+- expose tools by explicit opt-in rather than by default;
+- use confirmation tiers for sensitive or irreversible actions;
+- isolate credentials from delegated reasoning workers;
+- run long tasks asynchronously and track their state;
+- keep local-first / loopback boundaries for sensitive capabilities;
+- use budgets, retry caps, cooldowns and circuit-breaker style guardrails;
+- treat cockpit/UI surfaces as projections rather than the authoritative memory.
+
+The private Vault does NOT copy Jarvis wholesale and does not inherit its cloud
+providers or credentials. We selectively port patterns that fit the existing
+Vault doctrine. Vault/SQLite remains the source of truth, Notion remains a cockpit
+projection, and approvals remain authoritative.
+
+Local checkout: external/jarvis-assistant-vocal
+
+Relevant upstream references include:
+- docs/hermes.md
+- docs/mcp.md
+- docs/hub_contenu.md
+- docs/costs.md
+- docs/cockpit.md
+
 ## Setup / update
 
 Run: .\setup_upstreams.ps1
 
-The script shallow-clones or refreshes both upstream repositories.
+The script shallow-clones or refreshes all three upstream repositories.
 
 ## Provider rule
 
