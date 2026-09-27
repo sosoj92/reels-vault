@@ -29,6 +29,7 @@ import vault_db
 import vault_intelligence as intelligence
 import vault_intelligence_context as intelligence_context
 import vault_intelligence_query as intelligence_query
+import vault_intelligence_signals as intelligence_signals
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("REELS_VAULT_PORT", 8765))
 API_VERSION = "2.1"
@@ -84,6 +85,11 @@ def _intelligence_query_error(_, exc):
 @app.exception_handler(intelligence_context.IntelligenceContextError)
 def _intelligence_context_error(_, exc):
     return JSONResponse(status_code=422, content={"error": "invalid_context_query", "detail": str(exc)})
+
+
+@app.exception_handler(intelligence_signals.IntelligenceSignalError)
+def _intelligence_signal_error(_, exc):
+    return JSONResponse(status_code=422, content={"error": "invalid_signal_query", "detail": str(exc)})
 
 
 # ------------------------------------------------------------------ modeles
@@ -288,6 +294,23 @@ def intelligence_context_pack(
         claims_per_entity=claims_per_entity,
         sources_per_entity=sources_per_entity,
         relations_per_entity=relations_per_entity,
+    )
+
+
+@app.get(
+    "/intelligence/signals",
+    tags=["intelligence"],
+    summary="File proactive derivee : contradictions, verification, identite et suites manquantes",
+)
+def intelligence_signal_queue(
+    priority: Optional[int] = Query(None, ge=1, le=4),
+    limit: int = Query(100, ge=1, le=500),
+    conn=Depends(db),
+):
+    return intelligence_signals.collect_signals(
+        conn,
+        priority=priority,
+        limit=limit,
     )
 
 
