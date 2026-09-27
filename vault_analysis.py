@@ -918,7 +918,8 @@ class AutoAnalysisProvider:
     Routeur local economique et prudent :
     - Qwen 1.7B pour les sources ordinaires ;
     - Qwen 4B pour les sources sensibles (sante, finance, administratif, juridique) ;
-    - pour une source ordinaire, escalade vers 4B si le petit modele echoue ;
+    - une source ordinaire ne bascule PAS vers le 4B apres un timeout/echec ;
+    - le 1.7B peut seulement retenter une fois un JSON invalide ;
     - Gemini reste un dernier fallback optionnel si une cle est configuree ;
     - jamais de fallback Mistral implicite.
     """
@@ -977,7 +978,15 @@ class AutoAnalysisProvider:
                 )
             self.last_route = "careful"
         else:
-            candidates = self.providers
+            # Ne pas transformer un echec FAST en plusieurs minutes de 4B.
+            # Le modele CAREFUL est reserve aux sources sensibles des le depart.
+            candidates = [self.fast_provider]
+            if os.environ.get("GEMINI_API_KEY"):
+                candidates.extend(
+                    provider
+                    for provider in self.providers
+                    if isinstance(provider, GeminiAnalysisProvider)
+                )
             self.last_route = "fast"
 
         errors = []
