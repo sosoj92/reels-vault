@@ -241,6 +241,7 @@ def source_payload(conn, source_id, max_chars=None):
         "content_id": content_id,
         "source_url": source.get("source_url"),
         "platform": source.get("platform"),
+        "category": content.get("category"),
         "title": title,
         "description": description,
         "transcript": transcript,
@@ -833,37 +834,132 @@ class GeminiAnalysisProvider:
         return _parse_result_object(data)
 
 
+SENSITIVE_ANALYSIS_TERMS = (
+    "health",
+    "sante",
+    "medical",
+    "medicine",
+    "medecin",
+    "medicament",
+    "treatment",
+    "traitement",
+    "clinical",
+    "clinique",
+    "patient",
+    "diagnosis",
+    "diagnostic",
+    "psychiatr",
+    "adhd",
+    "tdah",
+    "autism",
+    "autisme",
+    "tsa",
+    "dose",
+    "dosage",
+    "urssaf",
+    "france travail",
+    "allocation",
+    "chomage",
+    "fiscal",
+    "impot",
+    "tax",
+    "banque",
+    "bank",
+    "loan",
+    "credit",
+    "juridique",
+    "legal",
+    "lawyer",
+    "avocat",
+)
+
+
+def _payload_is_sensitive(payload):
+    text = "\n".join(
+        str(part or "")
+        for part in (
+            payload.get("category"),
+            payload.get("title"),
+            payload.get("description"),
+            payload.get("transcript"),
+        )
+    )
+    folded = _fold_for_evidence(text)
+    for term in SENSITIVE_ANALYSIS_TERMS:
+        folded_term = _fold_for_evidence(term)
+        if not folded_term:
+            continue
+        pattern = (
+            r"(?<![a-z0-9])"
+            + re.escape(folded_term)
+            + r"(?![a-z0-9])"
+        )
+        if re.search(pattern, folded):
+            return True
+    return False
+
+
 class AutoAnalysisProvider:
     """
-    Routeur economique :
-    1) Ollama/Qwen local ;
-    2) Gemini uniquement si une cle est configuree ;
-    3) jamais de fallback Mistral implicite.
-
-    Le provider/model exposes apres analyse correspondent au moteur reel,
-    ce qui preserve correctement le cache et la provenance.
+    Routeur local economique et prudent :
+    - Qwen 1.7B pour les sources ordinaires ;
+    - Qwen 4B pour les sources sensibles (sante, finance, administratif, juridique) ;
+    - pour une source ordinaire, escalade vers 4B si le petit modele echoue ;
+    - Gemini reste un dernier fallback optionnel si une cle est configuree ;
+    - jamais de fallback Mistral implicite.
     """
 
     name = "auto"
 
     def __init__(self, providers=None):
+        self._custom_providers = providers is not None
         if providers is not None:
             self.providers = list(providers)
+            self.fast_provider = None
+            self.careful_provider = None
+            self.model = "cost-router"
         else:
-            self.providers = [OllamaAnalysisProvider()]
+            self.fast_provider = OllamaAnalysisProvider(
+                model=os.environ.get("OLLAMA_FAST_MODEL", "qwen3:1.7b")
+            )
+            self.careful_provider = OllamaAnalysisProvider(
+                model=os.environ.get("OLLAMA_CAREFUL_MODEL", "qwen3:4b")
+            )
+            self.providers = [
+                self.fast_provider,
+                self.careful_provider,
+            ]
             if os.environ.get("GEMINI_API_KEY"):
                 self.providers.append(GeminiAnalysisProvider())
-        self.model = "cost-router"
+            self.model = "local-risk-router-v1"
+
         self.max_chars = min(
             getattr(provider, "max_chars", 30000)
             for provider in self.providers
         ) if self.providers else 8000
         self.last_provider = None
         self.last_model = None
+        self.last_route = None
 
     def analyze(self, payload):
+        if self._custom_providers:
+            candidates = self.providers
+            self.last_route = "custom"
+        elif _payload_is_sensitive(payload):
+            candidates = [self.careful_provider]
+            if os.environ.get("GEMINI_API_KEY"):
+                candidates.extend(
+                    provider
+                    for provider in self.providers
+                    if isinstance(provider, GeminiAnalysisProvider)
+                )
+            self.last_route = "careful"
+        else:
+            candidates = self.providers
+            self.last_route = "fast"
+
         errors = []
-        for provider in self.providers:
+        for provider in candidates:
             try:
                 result = provider.analyze(payload)
                 self.last_provider = provider.name
@@ -1005,6 +1101,21 @@ def provider_from_name(name):
 
 
 def _existing_analysis(conn, source_id, fingerprint, provider):
+    if provider.name == "auto":
+        row = conn.execute(
+            """
+            SELECT *
+              FROM intelligence_source_analysis
+             WHERE source_id = ?
+               AND source_fingerprint = ?
+               AND superseded_at IS NULL
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (source_id, fingerprint),
+        ).fetchone()
+        return dict(row) if row else None
+
     row = conn.execute(
         """
         SELECT *
@@ -1332,6 +1443,7 @@ def analyze_source(conn, source_id, provider):
                             "last_model",
                             getattr(provider, "model", None),
                         ),
+                        "route": getattr(provider, "last_route", None),
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -1401,6 +1513,8 @@ def analyze_source(conn, source_id, provider):
         "claims_written": len(claim_ids),
         "relations_written": len(relation_ids),
         "rejected_items": len(rejected),
+        "execution_model": _execution_model_name(provider),
+        "route": getattr(provider, "last_route", None),
     }
 
 
