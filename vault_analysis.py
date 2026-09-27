@@ -647,6 +647,12 @@ class OllamaAnalysisProvider:
         self.max_chars = int(
             os.environ.get("OLLAMA_ANALYSIS_MAX_CHARS", "8000")
         )
+        self.num_ctx = int(
+            os.environ.get("OLLAMA_ANALYSIS_NUM_CTX", "6144")
+        )
+        self.num_predict = int(
+            os.environ.get("OLLAMA_ANALYSIS_NUM_PREDICT", "900")
+        )
 
     def analyze(self, payload):
         body = {
@@ -670,6 +676,8 @@ class OllamaAnalysisProvider:
             "keep_alive": "10m",
             "options": {
                 "temperature": 0,
+                "num_ctx": self.num_ctx,
+                "num_predict": self.num_predict,
             },
         }
 
