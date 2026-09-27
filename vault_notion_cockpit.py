@@ -6,7 +6,8 @@ Notion est un miroir operationnel, jamais la source de verite.
 
 Le cockpit synchronise uniquement :
 - les entites attention_status='now' ;
-- les signaux proactifs de priorite 1 ou 2.
+- les signaux proactifs de priorite 1 ou 2 ;
+- les actions issues de ces signaux (meme Vault ref, donc pas de doublon).
 
 Aucun LLM n'est utilise. Aucun claim n'est requalifie. Les ecritures Notion
 sont explicites et necessitent --confirm.
@@ -32,9 +33,12 @@ from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import vault_db
 import vault_intelligence as intelligence
+import vault_intelligence_actions as intelligence_actions
 import vault_intelligence_query as intelligence_query
 import vault_intelligence_signals as intelligence_signals
+from connectors.base import env as read_env
 
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2026-03-11"
@@ -135,9 +139,14 @@ def build_projection(conn):
             }
         )
 
+    mapped_actions = intelligence_actions.list_signal_actions(conn)["items"]
+    mapped_by_signal = {item["signal_key"]: item for item in mapped_actions}
+
     signal_queue = intelligence_signals.collect_signals(conn, limit=500)
+    signals_by_key = {item["key"]: item for item in signal_queue["items"]}
+
     for signal in signal_queue["items"]:
-        if signal["priority"] > 2:
+        if signal["priority"] > 2 or signal["key"] in mapped_by_signal:
             continue
         rows.append(
             {
@@ -153,10 +162,51 @@ def build_projection(conn):
             }
         )
 
+    for action in mapped_actions:
+        signal = signals_by_key.get(action["signal_key"])
+        status = action["status"]
+        attention = {
+            "done": "✅ En place",
+            "dismissed": "⛔ Écarté",
+            "archived": "⛔ Écarté",
+        }.get(status, "🔥 Maintenant")
+        next_step = {
+            "proposed": "Valider ou ignorer cette proposition.",
+            "approved": "Action validée : préparer son exécution.",
+            "todo": "Action validée : à exécuter.",
+            "doing": "Action en cours.",
+            "done": "Action terminée.",
+            "dismissed": "Proposition ignorée.",
+            "archived": "Action archivée.",
+        }.get(status, "Examiner cette action.")
+
+        rows.append(
+            {
+                # Meme ref que le signal d'origine : Notion met a jour la ligne.
+                "vault_ref": f"signal:{action['signal_key']}",
+                "item": f"🧭 {action['title']}",
+                "kind": "Action",
+                "attention": attention,
+                "priority": action.get("priority") or 3,
+                "why": action.get("description") or "Proposition du Life Intelligence System.",
+                "next_step": next_step,
+                "verification": (
+                    signal.get("verification_status")
+                    if signal and signal.get("verification_status")
+                    else "n/a"
+                ),
+                "source": (
+                    signal.get("source_url")
+                    if signal
+                    else action.get("content_source_url")
+                ),
+            }
+        )
+
     rows.sort(
         key=lambda row: (
             row["priority"],
-            0 if row["kind"] == "Signal" else 1,
+            {"Action": 0, "Signal": 1, "Entity": 2}.get(row["kind"], 3),
             row["item"].lower(),
         )
     )
@@ -208,10 +258,10 @@ def _payload_hash(properties):
 
 class NotionCockpitClient:
     def __init__(self, token=None, data_source_id=None, timeout=20):
-        self.token = token or os.environ.get("NOTION_TOKEN")
+        self.token = token or read_env("NOTION_TOKEN")
         self.data_source_id = (
             data_source_id
-            or os.environ.get("NOTION_COCKPIT_DATA_SOURCE_ID")
+            or read_env("NOTION_COCKPIT_DATA_SOURCE_ID")
             or DEFAULT_DATA_SOURCE_ID
         )
         self.timeout = timeout
@@ -380,7 +430,7 @@ def main():
                     "items": rows,
                     "writes_performed": False,
                     "notion_data_source_id": (
-                        os.environ.get("NOTION_COCKPIT_DATA_SOURCE_ID")
+                        read_env("NOTION_COCKPIT_DATA_SOURCE_ID")
                         or DEFAULT_DATA_SOURCE_ID
                     ),
                 },
