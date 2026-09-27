@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 import vault_intelligence as intelligence
+import vault_intelligence_actions as intelligence_actions
 import vault_intelligence_bridge as bridge
 import vault_resolution as resolution
 from vault_notion_cockpit import NotionCockpitClient, sync_projection
@@ -68,6 +69,11 @@ def refresh(vault_path, db_path, *, sync_notion=True):
         discovered = resolution.discover_local_candidates(conn)
         resolved = resolution.apply_safe_candidates(conn)
 
+        proposals = intelligence_actions.propose_priority_actions(
+            conn,
+            max_priority=2,
+        )
+
         cockpit = {
             "status": "skipped",
             "reason": "disabled",
@@ -99,6 +105,12 @@ def refresh(vault_path, db_path, *, sync_notion=True):
                 ],
                 "applied": resolved["applied"],
                 "skipped": resolved["skipped"],
+            },
+            "action_proposals": {
+                "created": proposals["created"],
+                "existing": proposals["existing"],
+                "unsupported": proposals["unsupported"],
+                "skipped_priority": proposals["skipped_priority"],
             },
             "cockpit": cockpit,
             "semantic_analysis_started": False,
