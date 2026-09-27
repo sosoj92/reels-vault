@@ -247,9 +247,14 @@ def list_signal_actions(conn):
         """
         SELECT
             l.signal_key,
-            a.*
+            a.*,
+            c.source_url AS content_source_url,
+            c.title AS content_title,
+            r.name AS resource_name
           FROM intelligence_signal_actions l
           JOIN actions a ON a.id = l.action_id
+          LEFT JOIN contents c ON c.id = a.content_id
+          LEFT JOIN resources r ON r.id = a.resource_id
          ORDER BY
             CASE a.status
                 WHEN 'proposed' THEN 0
