@@ -27,3 +27,6 @@ mobile-inbox/
 
 # Logs locaux du worker d'analyse
 logs/
+
+# Checkouts upstream locaux (Agency Agents, Reels Vault original)
+external/
