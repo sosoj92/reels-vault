@@ -154,12 +154,23 @@ class IntelligenceSignalTests(unittest.TestCase):
 
         self.assertEqual(
             keys[f"identity_review:{entity}"]["priority"],
-            2,
+            3,
         )
         self.assertEqual(
             keys[f"source_analysis_needed:{source}"]["priority"],
             3,
         )
+
+    def test_now_identity_review_is_priority_two(self):
+        entity = self._entity("Current Tool", status="now", needs_review=True)
+
+        queue = signals.collect_signals(self.conn)
+        item = next(
+            x for x in queue["items"]
+            if x["key"] == f"identity_review:{entity}"
+        )
+
+        self.assertEqual(item["priority"], 2)
 
     def test_sensitive_unanalysed_source_is_priority_two(self):
         entity = self._entity("Admin source")
