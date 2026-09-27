@@ -1,0 +1,5 @@
+# Sorties et configuration personnelles : jamais versionnées.
+# filtres.yaml décrit TES collections Instagram ; il se régénère avec
+#     python filtre.py --export "CHEMIN/VERS/TON_EXPORT" --init-config
+filtres.yaml
+liens*.txt

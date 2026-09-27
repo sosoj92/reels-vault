@@ -1,0 +1,43 @@
+# filtres.exemple.yaml — à copier en filtres.yaml pour démarrer.
+#
+# Le plus sûr : laisse filtre.py le générer depuis TON export, avec tes vraies
+# collections déjà listées :
+#
+#     python filtre.py --export "CHEMIN/VERS/TON_EXPORT" --init-config
+#
+# puis passe à `false` ce que tu ne veux pas voir atterrir dans ta base.
+#
+# Rappel : `filtres.yaml` est personnel (il décrit TES collections) et n'est pas
+# versionné — voir .gitignore.
+
+defaut: revoir          # verdict des posts qu'aucune règle ne classe : revoir | garder | ecarter
+
+exclusions: []          # mots-clés qui écartent un post quoi qu'il arrive
+
+collections:            # une entrée par collection de ton compte
+  - nom: "Cuisine"      # le nom tel qu'Instagram l'exporte
+    garder: true
+    theme: cuisine
+  - nom: "Voyages"
+    garder: true
+    theme: voyages
+  - nom: "Mèmes"
+    garder: false
+    theme: memes
+  - nom: "Citations"
+    garder: false
+    theme: citations
+
+themes:                 # filet de sécurité pour les posts rattachés à aucune collection
+  cuisine:
+    garder: true
+    mots_cles: [recette, recettes, cuisine, mealprep, proteine]
+  voyages:
+    garder: true
+    mots_cles: [voyage, travel, itineraire, roadtrip, adresse]
+  memes:
+    garder: false
+    mots_cles: [meme, memes, humour, drole]
+  citations:
+    garder: false
+    mots_cles: [quotes, citation, citations, mindset]

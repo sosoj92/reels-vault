@@ -114,6 +114,46 @@ Deux fichiers t'intéressent :
 
 ---
 
+## Étape 3 bis — Choisir ce qu'on ingère vraiment
+
+Un export, c'est tout : les pépites comme les mèmes. Transcrire des centaines de Reels inutiles, c'est des heures de calcul pour des fiches que personne ne relira jamais.
+
+**`filtre.py`** lit l'export, applique **`filtres.yaml`** (un fichier que tu édites à la main) et écrit la liste des liens retenus. Il génère aussi ton fichier de départ, à partir de tes propres collections :
+
+```
+python filtre.py --export "CHEMIN\VERS\instagram-votre_compte" --init-config
+```
+
+```
+python filtre.py --export "CHEMIN\VERS\instagram-votre_compte" --liste-collections
+```
+
+```
+python filtre.py --export "CHEMIN\VERS\instagram-votre_compte" --rapport
+```
+
+```
+python ingest.py liens-filtres.txt
+```
+
+Dans `filtres.yaml` (que tu ne versionnes pas : il décrit tes collections), chaque collection de ton compte a sa ligne :
+
+```yaml
+  - nom: "Cuisine"
+    garder: true
+  - nom: "Mèmes"
+    garder: false
+```
+
+Passe une collection à `garder: true` et elle entre dans la base ; à `false` et elle reste dehors. Les `themes` (mots-clés) servent de filet pour les posts qu'aucune collection ne couvre. Un exemple complet est fourni dans `filtres.exemple.yaml`, et il faut PyYAML (`pip install pyyaml`).
+
+Deux choses valent la peine d'être sues :
+
+- L'export Instagram **relie bien chaque post à sa collection**, mais pas là où on l'attend : la clé `media` est toujours vide, le lien se cache dans une entrée `label_values` sans libellé. `filtre.py` va le chercher : le tri par collection est donc **exact**, pas deviné.
+- Les collections ne sont pas toujours rangées comme leur nom le laisse croire — un post peut atterrir dans une collection voisine. Le rapport affiche un exemple de légende par thème : jette un œil avant de lancer une longue session de transcription.
+
+---
+
 ## Étape 4 — Le script de récolte
 
 Crée un dossier `Vault` dans ton profil utilisateur et places-y **`ingest.py`** (lien de téléchargement en bas de page).
