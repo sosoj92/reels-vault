@@ -644,6 +644,20 @@ class SourceAnalysisTests(unittest.TestCase):
         self.assertEqual(router.last_model, "success-model")
         self.assertEqual(success.calls, 1)
 
+    def test_fast_route_does_not_escalate_local_failure_to_careful_model(self):
+        router = analysis.AutoAnalysisProvider()
+        fast = FailingAnalysisProvider()
+        careful = SuccessfulAnalysisProvider()
+        router.fast_provider = fast
+        router.careful_provider = careful
+        router.providers = [fast, careful]
+
+        with self.assertRaises(analysis.AnalysisError):
+            router.analyze({"title": "ordinary workflow", "description": "", "transcript": ""})
+
+        self.assertEqual(router.last_route, "fast")
+        self.assertEqual(careful.calls, 0)
+
     def test_auto_router_records_actual_execution_provider(self):
         source_id, _, _ = self._source()
         success = SuccessfulAnalysisProvider()
