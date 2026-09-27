@@ -192,8 +192,6 @@ def _orchestration_metadata(signal):
 
 def _upsert_action_orchestration(conn, action_id, signal):
     metadata = _orchestration_metadata(signal)
-    _upsert_action_orchestration(conn, action["id"], signal)
-
     stamp = intelligence.now()
     conn.execute(
         """
@@ -297,6 +295,7 @@ def propose_signal_action(conn, signal):
             "status": "proposed",
         },
     )
+    _upsert_action_orchestration(conn, action["id"], signal)
 
     stamp = intelligence.now()
     conn.execute(
