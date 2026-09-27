@@ -30,12 +30,58 @@ class VoiceBridgeError(ValueError):
     pass
 
 
-def _public_agent(agent):
-    return {
+def _compact_playbook(markdown, max_chars=5000):
+    """
+    Extrait les sections les plus utiles a une conversation vocale.
+    On garde la mission, les regles et le workflow sans envoyer tout le profil.
+    """
+    text = str(markdown or "")
+    wanted = (
+        "core mission",
+        "critical rules",
+        "workflow process",
+        "communication style",
+    )
+    sections = []
+    current = None
+    buffer = []
+
+    def flush():
+        nonlocal current, buffer
+        if current and buffer:
+            body = "\n".join(buffer).strip()
+            if body:
+                sections.append(f"## {current}\n{body}")
+        current = None
+        buffer = []
+
+    for line in text.splitlines():
+        if line.startswith("## "):
+            flush()
+            title = line[3:].strip()
+            folded = title.casefold()
+            if any(key in folded for key in wanted):
+                current = title
+            continue
+        if current:
+            buffer.append(line)
+    flush()
+
+    result = "\n\n".join(sections).strip()
+    if not result:
+        result = text.strip()
+    return result[:max_chars]
+
+
+def _public_agent(agent, include_playbook=False):
+    data = {
         "name": agent.name,
         "description": agent.description,
         "path": agent.path,
     }
+    if include_playbook:
+        data["playbook"] = _compact_playbook(agent.markdown)
+    return data
 
 
 def _explicit_agent_from_text(text, agents):
@@ -117,7 +163,7 @@ def route_voice_request(
     return {
         "text": text,
         "mode": mode,
-        "agents": [_public_agent(agent) for agent in selected],
+        "agents": [_public_agent(agent, include_playbook=True) for agent in selected],
         "routes": routes,
         "vault_context": vault_context,
         "voice_contract": {
