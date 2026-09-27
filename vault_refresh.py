@@ -30,7 +30,11 @@ import vault_intelligence as intelligence
 import vault_intelligence_actions as intelligence_actions
 import vault_intelligence_bridge as bridge
 import vault_resolution as resolution
-from vault_notion_cockpit import NotionCockpitClient, sync_projection
+from vault_notion_cockpit import (
+    NotionCockpitClient,
+    apply_notion_decisions,
+    sync_projection,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -69,6 +73,24 @@ def refresh(vault_path, db_path, *, sync_notion=True):
         discovered = resolution.discover_local_candidates(conn)
         resolved = resolution.apply_safe_candidates(conn)
 
+        notion_decisions = {
+            "status": "skipped",
+            "reason": "disabled",
+        }
+        client = None
+        if sync_notion:
+            client = NotionCockpitClient()
+            if client.configured():
+                notion_decisions = {
+                    "status": "checked",
+                    **apply_notion_decisions(conn, client),
+                }
+            else:
+                notion_decisions = {
+                    "status": "skipped",
+                    "reason": "NOTION_TOKEN missing",
+                }
+
         proposals = intelligence_actions.propose_priority_actions(
             conn,
             max_priority=2,
@@ -79,8 +101,7 @@ def refresh(vault_path, db_path, *, sync_notion=True):
             "reason": "disabled",
         }
         if sync_notion:
-            client = NotionCockpitClient()
-            if client.configured():
+            if client and client.configured():
                 cockpit = {
                     "status": "synced",
                     **sync_projection(conn, client),
@@ -106,6 +127,7 @@ def refresh(vault_path, db_path, *, sync_notion=True):
                 "applied": resolved["applied"],
                 "skipped": resolved["skipped"],
             },
+            "notion_decisions": notion_decisions,
             "action_proposals": {
                 "created": proposals["created"],
                 "existing": proposals["existing"],
