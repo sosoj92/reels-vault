@@ -19,16 +19,18 @@ import os
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import connectors
 import vault_db
+import vault_intelligence as intelligence
+import vault_intelligence_query as intelligence_query
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("REELS_VAULT_PORT", 8765))
-API_VERSION = "2.0"
+API_VERSION = "2.1"
 RACINE = Path(__file__).resolve().parent
 UI_FILE = RACINE / "ui" / "index.html"
 IMAGES_DIR = Path(os.environ.get("REELS_VAULT_IMAGES") or RACINE / "images")
@@ -42,7 +44,8 @@ app = FastAPI(
         "Description effective d'un contenu : description_manual > description_ai > description_original. "
         "Les champs modifies par l'utilisateur sont verrouilles contre les ecritures IA et les migrations. "
         "Les actions proposees par une IA sont creees au statut 'proposed' et ne sont jamais envoyees "
-        "vers un outil externe sans validation."
+        "vers un outil externe sans validation. "
+        "Life Intelligence V3 est exposee en lecture via /intelligence/*."
     ),
 )
 
@@ -70,6 +73,11 @@ def _connector_error(_, exc):
     code = "not_configured" if isinstance(exc, connectors.NotConfigured) else "connector_error"
     return JSONResponse(status_code=501 if code == "not_configured" else 502,
                         content={"error": code, "detail": str(exc)})
+
+
+@app.exception_handler(intelligence_query.IntelligenceQueryError)
+def _intelligence_query_error(_, exc):
+    return JSONResponse(status_code=422, content={"error": "invalid_query", "detail": str(exc)})
 
 
 # ------------------------------------------------------------------ modeles
@@ -181,6 +189,8 @@ def config(conn=Depends(db)):
         "action_types": list(vault_db.ACTION_TYPES),
         "resource_types": list(vault_db.RESOURCE_TYPES),
         "source_statuses": list(vault_db.SOURCE_STATUSES),
+        "attention_statuses": list(intelligence.ATTENTION_STATUSES),
+        "verification_statuses": list(intelligence.VERIFICATION_STATUSES),
         "task_provider": connectors.task_provider(conn),
         "task_provider_info": _task_provider(conn),
     }
@@ -201,6 +211,55 @@ def put_task_provider(body: TaskProviderIn, conn=Depends(db)):
 @app.get("/stats", tags=["systeme"], summary="Indicateurs du tableau de bord")
 def stats(conn=Depends(db)):
     return vault_db.get_stats(conn)
+
+
+# ------------------------------------------------------------------ Life Intelligence V3 (lecture)
+
+@app.get(
+    "/intelligence/overview",
+    tags=["intelligence"],
+    summary="Snapshot V3 : entites, sources, claims, relations et statuts epistemiques",
+)
+def intelligence_overview(conn=Depends(db)):
+    return intelligence_query.overview(conn)
+
+
+@app.get(
+    "/intelligence/entities",
+    tags=["intelligence"],
+    summary="Recherche et filtrage des entites persistantes V3",
+)
+def intelligence_entities(
+    q: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    attention_status: Optional[str] = Query(
+        None,
+        description="now, later, in_place, dismissed",
+    ),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    conn=Depends(db),
+):
+    return intelligence_query.list_entities(
+        conn,
+        q=q,
+        entity_type=entity_type,
+        attention_status=attention_status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/intelligence/entities/{entity_id}",
+    tags=["intelligence"],
+    summary="Vue probante d'une entite : sources, analyses actives, claims et relations",
+)
+def intelligence_entity(entity_id: int, conn=Depends(db)):
+    item = intelligence_query.get_entity(conn, entity_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"intelligence entity {entity_id} not found")
+    return item
 
 
 # ------------------------------------------------------------------ contenus
