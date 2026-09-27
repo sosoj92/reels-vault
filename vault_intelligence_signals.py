@@ -282,17 +282,25 @@ def collect_signals(conn, *, limit=100, priority=None):
 
     # 3. Identites provisoires explicitement marquees needs_review.
     rows = conn.execute(
-        "SELECT id, name, metadata FROM intelligence_entities ORDER BY id DESC"
+        """
+        SELECT id, name, metadata, attention_status
+          FROM intelligence_entities
+         ORDER BY id DESC
+        """
     ).fetchall()
     for row in rows:
         item = dict(row)
         if _metadata(item.get("metadata")).get("needs_review") is not True:
             continue
+        # Une identite provisoire n'est pas urgente par defaut. Elle remonte
+        # au cockpit quotidien seulement si l'entite est deja marquee "now".
+        # Les autres restent detectables dans la file complete (priorite 3).
+        identity_priority = 2 if item.get("attention_status") == "now" else 3
         signals.append(
             _signal(
                 key=f"identity_review:{item['id']}",
                 kind="identity_review",
-                priority=2,
+                priority=identity_priority,
                 reason="L'identite de cette entite est encore provisoire.",
                 suggested_action="Resoudre ou confirmer l'identite avant enrichissement automatique.",
                 entity_id=item["id"],
