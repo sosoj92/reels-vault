@@ -31,9 +31,10 @@ import vault_intelligence_actions as intelligence_actions
 import vault_intelligence_context as intelligence_context
 import vault_intelligence_query as intelligence_query
 import vault_intelligence_signals as intelligence_signals
+import vault_voice_bridge as voice_bridge
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("REELS_VAULT_PORT", 8765))
-API_VERSION = "2.1"
+API_VERSION = "2.2"
 RACINE = Path(__file__).resolve().parent
 UI_FILE = RACINE / "ui" / "index.html"
 IMAGES_DIR = Path(os.environ.get("REELS_VAULT_IMAGES") or RACINE / "images")
@@ -165,6 +166,16 @@ class TaskProviderIn(BaseModel):
 class ExportIn(BaseModel):
     content_ids: Optional[List[int]] = Field(None, description="Selection ; absent = tout le Vault")
     destination: Optional[str] = Field(None, description="Chemin de sortie ; defaut : dossier exports/")
+
+
+class VoiceAgentIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+    agent: Optional[str] = Field(
+        None,
+        description="Nom explicite d'un Agency Agent ; absent = routage automatique",
+    )
+    max_agents: int = Field(2, ge=1, le=3)
+    include_vault_context: bool = True
 
 
 def _fournis(model):
@@ -334,6 +345,24 @@ def intelligence_refresh_action_proposals(conn=Depends(db)):
         conn,
         max_priority=2,
     )
+
+
+@app.post(
+    "/intelligence/voice/route",
+    tags=["intelligence"],
+    summary="Router une demande vocale vers Agency Agents + contexte Vault, sans executer d'action",
+)
+def intelligence_voice_route(body: VoiceAgentIn, conn=Depends(db)):
+    try:
+        return voice_bridge.route_voice_request(
+            conn,
+            body.text,
+            requested_agent=body.agent,
+            max_agents=body.max_agents,
+            include_vault_context=body.include_vault_context,
+        )
+    except voice_bridge.VoiceBridgeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 # ------------------------------------------------------------------ contenus
