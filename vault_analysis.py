@@ -18,9 +18,7 @@ Regles de securite epistemique :
 Providers :
 - Ollama/Qwen local = moteur par defaut, sans cout API ;
 - Gemini = fallback cloud optionnel si GEMINI_API_KEY est configuree ;
-- Mistral = provider explicite uniquement.
-
-Le coeur reste provider-agnostic et aucun fallback payant n'est silencieux.
+Le coeur reste provider-agnostic. Aucun fallback payant n'est utilise automatiquement.
 """
 
 import argparse
@@ -926,7 +924,7 @@ class AutoAnalysisProvider:
     - une source ordinaire ne bascule PAS vers le 4B apres un timeout/echec ;
     - le 1.7B peut seulement retenter une fois un JSON invalide ;
     - Gemini reste un dernier fallback optionnel si une cle est configuree ;
-    - jamais de fallback Mistral implicite.
+    - aucun provider Mistral dans le runtime du Vault.
     """
 
     name = "auto"
@@ -1026,115 +1024,6 @@ class AutoAnalysisProvider:
         )
 
 
-class MistralChatAnalysisProvider:
-    name = "mistral"
-
-    def __init__(self, api_key=None, model=None, timeout=90):
-        self.api_key = api_key or os.environ.get("MISTRAL_API_KEY")
-        self.model = model or os.environ.get(
-            "MISTRAL_ANALYSIS_MODEL",
-            "mistral-medium-latest",
-        )
-        self.timeout = timeout
-        self.max_retries = int(os.environ.get("MISTRAL_ANALYSIS_MAX_RETRIES", "4"))
-        self.backoff_seconds = float(
-            os.environ.get("MISTRAL_ANALYSIS_BACKOFF_SECONDS", "1")
-        )
-        self.max_backoff_seconds = float(
-            os.environ.get("MISTRAL_ANALYSIS_MAX_BACKOFF_SECONDS", "20")
-        )
-
-        if not self.api_key:
-            raise AnalysisError(
-                "MISTRAL_API_KEY is not set. Do not paste the key into the Vault."
-            )
-
-    def _retry_after(self, exc, attempt):
-        try:
-            header = exc.headers.get("Retry-After")
-        except Exception:
-            header = None
-
-        if header:
-            try:
-                return max(0.0, float(header))
-            except (TypeError, ValueError):
-                pass
-
-        return min(
-            self.max_backoff_seconds,
-            self.backoff_seconds * (2 ** attempt),
-        )
-
-    def analyze(self, payload):
-        body = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You extract structured knowledge from supplied source text. "
-                        "Never use outside knowledge. Return JSON only."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": build_analysis_prompt(payload),
-                },
-            ],
-            "response_format": {"type": "json_object"},
-        }
-
-        request = urllib.request.Request(
-            "https://api.mistral.ai/v1/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
-
-        transient_codes = {429, 500, 502, 503, 504}
-        raw = None
-
-        for attempt in range(self.max_retries + 1):
-            try:
-                with urllib.request.urlopen(
-                    request,
-                    timeout=self.timeout,
-                ) as response:
-                    raw = response.read().decode("utf-8")
-                break
-            except urllib.error.HTTPError as exc:
-                body_text = exc.read().decode("utf-8", errors="replace")
-                if exc.code in transient_codes and attempt < self.max_retries:
-                    time.sleep(self._retry_after(exc, attempt))
-                    continue
-                message = f"Mistral HTTP {exc.code}: {body_text[:500]}"
-                if exc.code == 429:
-                    raise AnalysisRateLimitError(message) from exc
-                raise AnalysisError(message) from exc
-            except urllib.error.URLError as exc:
-                if attempt < self.max_retries:
-                    time.sleep(self._retry_after(exc, attempt))
-                    continue
-                raise AnalysisError(f"Mistral network error: {exc}") from exc
-
-        if raw is None:
-            raise AnalysisError("Mistral request ended without a response")
-
-        try:
-            response = json.loads(raw)
-            content = response["choices"][0]["message"]["content"]
-            data = json.loads(content)
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
-            raise AnalysisError("invalid Mistral JSON-mode response") from exc
-
-        return _parse_result_object(data)
-
-
 def provider_from_name(name):
     name = (name or "").strip().lower()
     if name == "auto":
@@ -1143,8 +1032,6 @@ def provider_from_name(name):
         return OllamaAnalysisProvider()
     if name == "gemini":
         return GeminiAnalysisProvider()
-    if name == "mistral":
-        return MistralChatAnalysisProvider()
     raise AnalysisError(f"unsupported analysis provider: {name!r}")
 
 
