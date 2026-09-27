@@ -40,6 +40,18 @@ Sync-Repo -Url "https://github.com/msitarzewski/agency-agents.git" -Path $Agency
 Sync-Repo -Url "https://github.com/sosoj92/reels-vault.git" -Path $ReelsUpstreamDir
 Sync-Repo -Url "https://github.com/sosoj92/jarvis-assistant-vocal.git" -Path $JarvisUpstreamDir
 
+$VaultPython = Join-Path $Root ".venv\Scripts\python.exe"
+$BridgeInstaller = Join-Path $Root "install_jarvis_voice_bridge.py"
+if ((Test-Path $VaultPython) -and (Test-Path $BridgeInstaller)) {
+    Write-Host "Installing Life Intelligence voice bridge into Jarvis..."
+    & $VaultPython $BridgeInstaller
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installation du pont vocal Jarvis/Life Intelligence echouee."
+    }
+} else {
+    Write-Host "WARNING: voice bridge installer skipped (Vault venv or installer missing)."
+}
+
 Write-Host ""
 Write-Host "Upstreams ready:"
 Write-Host "  Agency Agents : $AgencyDir"
