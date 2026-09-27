@@ -10,9 +10,13 @@ Regles :
 - les liens vers content/resource sont reutilises quand ils existent.
 """
 
+import json
+
 import vault_db
 import vault_intelligence as intelligence
 import vault_intelligence_signals as signals
+import vault_orchestrator as orchestrator
+from vault_agent_registry import AgentRegistryError
 
 
 SCHEMA = """
@@ -25,6 +29,20 @@ CREATE TABLE IF NOT EXISTS intelligence_signal_actions (
 
 CREATE INDEX IF NOT EXISTS idx_intelligence_signal_actions_action
     ON intelligence_signal_actions(action_id);
+
+CREATE TABLE IF NOT EXISTS intelligence_action_orchestration (
+    action_id    INTEGER PRIMARY KEY REFERENCES actions(id) ON DELETE CASCADE,
+    task         TEXT NOT NULL,
+    routes_json  TEXT NOT NULL DEFAULT '[]',
+    agents_json  TEXT NOT NULL DEFAULT '[]',
+    source       TEXT NOT NULL DEFAULT 'agency-agents',
+    status       TEXT NOT NULL DEFAULT 'ready',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_intelligence_action_orchestration_status
+    ON intelligence_action_orchestration(status);
 """
 
 
@@ -126,7 +144,86 @@ def _existing_action(conn, signal_key):
         return None
 
 
-def _description(signal):
+
+def _orchestration_task(signal):
+    hints = {
+        "contested_claim": "knowledge graph source claim contradiction verification",
+        "sensitive_claim_review": "knowledge graph source claim sensitive privacy verification",
+        "identity_review": "knowledge graph entity identity resolution provenance",
+        "source_analysis_needed": "knowledge graph source analysis sensitive privacy",
+        "now_without_action": "workflow orchestration next action automation",
+    }
+    parts = [
+        hints.get(signal.get("kind"), ""),
+        ACTION_SPECS.get(signal.get("kind"), {}).get("title", ""),
+        signal.get("reason") or "",
+        signal.get("suggested_action") or "",
+        signal.get("entity_name") or "",
+    ]
+    return " — ".join(part for part in parts if part)
+
+
+def _orchestration_metadata(signal):
+    task = _orchestration_task(signal)
+    try:
+        context = orchestrator.build_orchestration_context(task)
+        return {
+            "task": task,
+            "status": "ready",
+            "routes": context["routes"],
+            "agents": [
+                {
+                    "name": item["name"],
+                    "description": item["description"],
+                    "path": item["path"],
+                }
+                for item in context["agents"]
+            ],
+        }
+    except (AgentRegistryError, OSError) as exc:
+        return {
+            "task": task,
+            "status": "unavailable",
+            "routes": [],
+            "agents": [],
+            "error": str(exc),
+        }
+
+
+def _upsert_action_orchestration(conn, action_id, signal):
+    metadata = _orchestration_metadata(signal)
+    _upsert_action_orchestration(conn, action["id"], signal)
+
+    stamp = intelligence.now()
+    conn.execute(
+        """
+        INSERT INTO intelligence_action_orchestration(
+            action_id, task, routes_json, agents_json,
+            source, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'agency-agents', ?, ?, ?)
+        ON CONFLICT(action_id) DO UPDATE SET
+            task = excluded.task,
+            routes_json = excluded.routes_json,
+            agents_json = excluded.agents_json,
+            source = excluded.source,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        """,
+        (
+            action_id,
+            metadata["task"],
+            json.dumps(metadata["routes"], ensure_ascii=False, sort_keys=True),
+            json.dumps(metadata["agents"], ensure_ascii=False, sort_keys=True),
+            metadata["status"],
+            stamp,
+            stamp,
+        ),
+    )
+    conn.commit()
+    return metadata
+
+
+def _description(signal, orchestration=None):
     lines = [
         signal["reason"],
         "",
@@ -139,6 +236,11 @@ def _description(signal):
     if signal.get("verification_status"):
         lines.append(
             f"Statut épistémique : {signal['verification_status']}"
+        )
+    if orchestration and orchestration.get("agents"):
+        lines.append(
+            "Playbooks de raisonnement : "
+            + ", ".join(agent["name"] for agent in orchestration["agents"])
         )
     return "\n".join(lines)
 
@@ -161,10 +263,16 @@ def propose_signal_action(conn, signal):
 
     existing = _existing_action(conn, signal["key"])
     if existing:
+        orchestration_meta = _upsert_action_orchestration(
+            conn,
+            existing["id"],
+            signal,
+        )
         return {
             "status": "existing",
             "signal_key": signal["key"],
             "action": existing,
+            "orchestration": orchestration_meta,
         }
 
     content_id = _source_content_id(conn, signal.get("source_id"))
@@ -175,11 +283,12 @@ def propose_signal_action(conn, signal):
     )
 
     spec = ACTION_SPECS[signal["kind"]]
+    orchestration_meta = _orchestration_metadata(signal)
     action = vault_db.create_action(
         conn,
         {
             "title": _title(signal),
-            "description": _description(signal),
+            "description": _description(signal, orchestration_meta),
             "action_type": spec["action_type"],
             "priority": signal["priority"],
             "content_id": content_id,
@@ -207,6 +316,7 @@ def propose_signal_action(conn, signal):
         "status": "created",
         "signal_key": signal["key"],
         "action": action,
+        "orchestration": orchestration_meta,
     }
 
 
@@ -250,11 +360,16 @@ def list_signal_actions(conn):
             a.*,
             c.source_url AS content_source_url,
             c.title AS content_title,
-            r.name AS resource_name
+            r.name AS resource_name,
+            o.task AS orchestration_task,
+            o.routes_json AS orchestration_routes,
+            o.agents_json AS orchestration_agents,
+            o.status AS orchestration_status
           FROM intelligence_signal_actions l
           JOIN actions a ON a.id = l.action_id
           LEFT JOIN contents c ON c.id = a.content_id
           LEFT JOIN resources r ON r.id = a.resource_id
+          LEFT JOIN intelligence_action_orchestration o ON o.action_id = a.id
          ORDER BY
             CASE a.status
                 WHEN 'proposed' THEN 0
