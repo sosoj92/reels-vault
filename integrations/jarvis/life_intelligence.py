@@ -10,6 +10,7 @@ le contexte borne + les playbooks compacts des agents selectionnes.
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -24,7 +25,29 @@ def _vault_root() -> Path:
     return (Path.home() / "reels-vault").resolve()
 
 
-def _commande(question: str, agent: str = ""):
+def router_demande_agents(phrase: str):
+    """Route deterministe : ne laisse pas un petit LLM decider si le Vault est vise."""
+    p = " ".join(re.sub(r"[^a-z0-9]+", " ", str(phrase or "").lower()).split())
+    expressions = (
+        "mon vault",
+        "dans le vault",
+        "mes agents",
+        "consulte mes agents",
+        "parle a mes agents",
+        "demande a mes agents",
+        "life intelligence",
+        "knowledge graph engineer",
+        "data engineer",
+        "multi agent systems architect",
+        "demande au knowledge graph",
+        "parle au knowledge graph",
+    )
+    if any(expr in p for expr in expressions):
+        return "consulter_agents_vault", {"question": str(phrase or "").strip()}
+    return None
+
+
+def _commande(question: str, agent: str = "", prompt: bool = False):
     root = _vault_root()
     py = root / ".venv" / "Scripts" / "python.exe"
     bridge = root / "vault_voice_bridge.py"
@@ -48,38 +71,61 @@ def _commande(question: str, agent: str = ""):
     ]
     if agent:
         cmd += ["--agent", agent]
+    if prompt:
+        cmd.append("--prompt")
     return cmd
 
 
-def _formater(paquet: dict) -> str:
-    agents = paquet.get("agents") or []
-    noms = ", ".join(a.get("name", "?") for a in agents) or "aucun"
+def _extraire_texte_reponse(rep) -> str:
+    morceaux = []
+    for bloc in getattr(rep, "content", []) or []:
+        if getattr(bloc, "type", None) == "text" and getattr(bloc, "text", None):
+            morceaux.append(bloc.text)
+    return " ".join(morceaux).strip()
 
-    blocs = [
-        f"AGENTS SELECTIONNES: {noms}",
-        "",
-        "INSTRUCTION: reponds maintenant a la demande utilisateur en appliquant "
-        "les playbooks ci-dessous. Pour toute affirmation propre au Vault, "
-        "utilise uniquement le contexte Vault fourni. Si le Vault ne suffit pas, dis-le.",
-    ]
 
-    for a in agents:
-        blocs += [
-            "",
-            f"--- {a.get('name', 'Agent')} ---",
-            a.get("description", ""),
-            a.get("playbook", ""),
-        ]
+def _reponse_agentique(question: str, agent: str = "") -> str:
+    """Construit le prompt Vault/agents puis fait UNE reponse sans tool-calling."""
+    try:
+        proc = subprocess.run(
+            _commande(question, agent, prompt=True),
+            cwd=str(_vault_root()),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=dict(os.environ),
+        )
+    except subprocess.TimeoutExpired:
+        return "Le pont Life Intelligence a mis trop de temps a repondre."
+    except Exception as exc:
+        return f"Life Intelligence indisponible : {str(exc)[:180]}"
 
-    blocs += [
-        "",
-        "CONTEXTE VAULT:",
-        json.dumps(paquet.get("vault_context"), ensure_ascii=False),
-        "",
-        "DEMANDE:",
-        str(paquet.get("text") or ""),
-    ]
-    return "\n".join(blocs)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return f"Life Intelligence a echoue : {detail[:240]}"
+
+    prompt = (proc.stdout or "").strip()
+    if not prompt:
+        return "Life Intelligence n'a produit aucun contexte exploitable."
+
+    try:
+        from core.llm import llm
+        fournisseur = llm()
+        if not fournisseur.disponible():
+            return "Le modele Jarvis n'est pas disponible."
+        rep = fournisseur.repondre(
+            prompt,
+            [{"role": "user", "content": question}],
+            [],
+        )
+        texte = _extraire_texte_reponse(rep)
+        if not texte:
+            return "Je n'ai pas obtenu de reponse exploitable de l'agent."
+        from core.confidentialite import caviarder
+        return caviarder(texte)
+    except Exception as exc:
+        return f"L'agent n'a pas reussi a repondre : {str(exc)[:180]}"
 
 
 @outil(
@@ -116,29 +162,4 @@ def consulter_agents_vault(question: str, agent: str = "") -> str:
     question = str(question or "").strip()
     if not question:
         return "Je n'ai pas recu de question pour tes agents."
-
-    try:
-        proc = subprocess.run(
-            _commande(question, agent),
-            cwd=str(_vault_root()),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-            env=dict(os.environ),
-        )
-    except subprocess.TimeoutExpired:
-        return "Le pont Life Intelligence a mis trop de temps a repondre."
-    except Exception as exc:
-        return f"Life Intelligence indisponible : {str(exc)[:180]}"
-
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        return f"Life Intelligence a echoue : {detail[:240]}"
-
-    try:
-        paquet = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return "Life Intelligence a renvoye une reponse illisible."
-
-    return _formater(paquet)
+    return _reponse_agentique(question, agent)
