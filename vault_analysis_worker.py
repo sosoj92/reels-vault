@@ -7,7 +7,7 @@ Ce worker est volontairement separe de l'ingestion :
 - seules les sources encore non analysees sont traitees ;
 - le fingerprint de vault_analysis.py garantit l'idempotence ;
 - un echec est mis en cooldown pour eviter de marteler Ollama ;
-- Mistral n'est jamais utilise implicitement ;
+- aucun provider Mistral n'est utilise par ce worker ;
 - apres au moins une analyse reussie, le refresh V3/Notion peut etre relance.
 
 Usage :
@@ -270,7 +270,7 @@ def main():
     parser.add_argument(
         "--provider",
         default="auto",
-        help="auto par defaut ; Mistral uniquement si demande explicitement",
+        help="auto par defaut (local Qwen, fallback cloud seulement si configure)",
     )
     parser.add_argument("--limit", type=int, default=2)
     parser.add_argument("--cooldown-hours", type=float, default=2.0)
