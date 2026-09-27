@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 import connectors
 import vault_db
 import vault_intelligence as intelligence
+import vault_intelligence_actions as intelligence_actions
 import vault_intelligence_context as intelligence_context
 import vault_intelligence_query as intelligence_query
 import vault_intelligence_signals as intelligence_signals
@@ -311,6 +312,27 @@ def intelligence_signal_queue(
         conn,
         priority=priority,
         limit=limit,
+    )
+
+
+@app.get(
+    "/intelligence/action-proposals",
+    tags=["intelligence"],
+    summary="Actions V2 proposees a partir des signaux V3, jamais executees automatiquement",
+)
+def intelligence_action_proposals(conn=Depends(db)):
+    return intelligence_actions.list_signal_actions(conn)
+
+
+@app.post(
+    "/intelligence/action-proposals/refresh",
+    tags=["intelligence"],
+    summary="Materialiser les signaux prioritaires en actions au statut proposed",
+)
+def intelligence_refresh_action_proposals(conn=Depends(db)):
+    return intelligence_actions.propose_priority_actions(
+        conn,
+        max_priority=2,
     )
 
 
