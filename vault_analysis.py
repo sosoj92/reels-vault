@@ -630,7 +630,15 @@ class OllamaAnalysisProvider:
 
     name = "ollama"
 
-    def __init__(self, model=None, base_url=None, timeout=None):
+    def __init__(
+        self,
+        model=None,
+        base_url=None,
+        timeout=None,
+        max_chars=None,
+        num_ctx=None,
+        num_predict=None,
+    ):
         self.model = model or os.environ.get(
             "OLLAMA_ANALYSIS_MODEL",
             "qwen3:4b",
@@ -645,14 +653,20 @@ class OllamaAnalysisProvider:
             if timeout is not None
             else float(os.environ.get("OLLAMA_ANALYSIS_TIMEOUT", "600"))
         )
-        self.max_chars = int(
-            os.environ.get("OLLAMA_ANALYSIS_MAX_CHARS", "8000")
+        self.max_chars = (
+            int(max_chars)
+            if max_chars is not None
+            else int(os.environ.get("OLLAMA_ANALYSIS_MAX_CHARS", "8000"))
         )
-        self.num_ctx = int(
-            os.environ.get("OLLAMA_ANALYSIS_NUM_CTX", "6144")
+        self.num_ctx = (
+            int(num_ctx)
+            if num_ctx is not None
+            else int(os.environ.get("OLLAMA_ANALYSIS_NUM_CTX", "6144"))
         )
-        self.num_predict = int(
-            os.environ.get("OLLAMA_ANALYSIS_NUM_PREDICT", "900")
+        self.num_predict = (
+            int(num_predict)
+            if num_predict is not None
+            else int(os.environ.get("OLLAMA_ANALYSIS_NUM_PREDICT", "900"))
         )
 
     def analyze(self, payload):
@@ -920,10 +934,18 @@ class AutoAnalysisProvider:
             self.model = "cost-router"
         else:
             self.fast_provider = OllamaAnalysisProvider(
-                model=os.environ.get("OLLAMA_FAST_MODEL", "qwen3:1.7b")
+                model=os.environ.get("OLLAMA_FAST_MODEL", "qwen3:1.7b"),
+                timeout=float(os.environ.get("OLLAMA_FAST_TIMEOUT", "180")),
+                max_chars=int(os.environ.get("OLLAMA_FAST_MAX_CHARS", "8000")),
+                num_ctx=int(os.environ.get("OLLAMA_FAST_NUM_CTX", "6144")),
+                num_predict=int(os.environ.get("OLLAMA_FAST_NUM_PREDICT", "1100")),
             )
             self.careful_provider = OllamaAnalysisProvider(
-                model=os.environ.get("OLLAMA_CAREFUL_MODEL", "qwen3:4b")
+                model=os.environ.get("OLLAMA_CAREFUL_MODEL", "qwen3:4b"),
+                timeout=float(os.environ.get("OLLAMA_CAREFUL_TIMEOUT", "300")),
+                max_chars=int(os.environ.get("OLLAMA_CAREFUL_MAX_CHARS", "5000")),
+                num_ctx=int(os.environ.get("OLLAMA_CAREFUL_NUM_CTX", "4096")),
+                num_predict=int(os.environ.get("OLLAMA_CAREFUL_NUM_PREDICT", "700")),
             )
             self.providers = [
                 self.fast_provider,
@@ -960,17 +982,29 @@ class AutoAnalysisProvider:
 
         errors = []
         for provider in candidates:
-            try:
-                result = provider.analyze(payload)
-                self.last_provider = provider.name
-                self.last_model = provider.model
-                return result
-            except AnalysisRateLimitError as exc:
-                errors.append(f"{provider.name}: {exc}")
-                continue
-            except AnalysisError as exc:
-                errors.append(f"{provider.name}: {exc}")
-                continue
+            attempts = 2 if (
+                provider is self.fast_provider
+                and self.last_route == "fast"
+            ) else 1
+
+            for attempt in range(attempts):
+                try:
+                    result = provider.analyze(payload)
+                    self.last_provider = provider.name
+                    self.last_model = provider.model
+                    return result
+                except AnalysisRateLimitError as exc:
+                    errors.append(f"{provider.name}: {exc}")
+                    break
+                except AnalysisError as exc:
+                    errors.append(f"{provider.name}: {exc}")
+                    if (
+                        attempt == 0
+                        and attempts == 2
+                        and "invalid Ollama JSON response" in str(exc)
+                    ):
+                        continue
+                    break
 
         raise AnalysisError(
             "No low-cost analysis provider is available. "
