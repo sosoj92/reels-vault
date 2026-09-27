@@ -22,6 +22,7 @@ TARGET_TOOL = JARVIS / "tools" / "life_intelligence.py"
 ROUTER = JARVIS / "core" / "routage_intentions.py"
 
 MARKER = "# LIFE_INTELLIGENCE_BRIDGE"
+PRIORITY_MARKER = "# LIFE_INTELLIGENCE_PRIORITY_ROUTE"
 ROUTE_BLOCK = f'''    {MARKER}
     (("agent", "agents", "vault", "life intelligence", "knowledge graph",
       "data engineer", "multi agent", "multi-agent"),
@@ -47,6 +48,27 @@ def install():
     shutil.copy2(SOURCE_TOOL, TARGET_TOOL)
 
     text = ROUTER.read_text(encoding="utf-8")
+
+    if PRIORITY_MARKER not in text:
+        anchor_priority = '''    # Caméra/gestes : commandes locales explicites, avant toute interprétation
+'''
+        priority_block = '''    # LIFE_INTELLIGENCE_PRIORITY_ROUTE
+    try:
+        from tools.life_intelligence import router_demande_agents
+        route = router_demande_agents(phrase)
+        if route:
+            nom, arguments = route
+            return Decision("outil", nom, arguments or {})
+    except Exception:
+        LOG.exception("routage Life Intelligence")
+
+'''
+        if anchor_priority not in text:
+            raise InstallError(
+                "Point d'insertion prioritaire Jarvis introuvable dans core/routage_intentions.py"
+            )
+        text = text.replace(anchor_priority, priority_block + anchor_priority, 1)
+
     if MARKER not in text:
         anchor = '''    (("hermes", "recherche de fond", "analyse approfondie", "compare",
       "comparaison", "synthese", "veille"), {"deleguer_a_hermes", "web"}),
@@ -56,7 +78,8 @@ def install():
                 "Point d'insertion Jarvis introuvable dans core/routage_intentions.py"
             )
         text = text.replace(anchor, ROUTE_BLOCK + anchor, 1)
-        ROUTER.write_text(text, encoding="utf-8")
+
+    ROUTER.write_text(text, encoding="utf-8")
 
     return {
         "jarvis": str(JARVIS),
