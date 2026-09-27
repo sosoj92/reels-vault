@@ -3,7 +3,7 @@
 __pycache__/
 *.pyc
 
-# Données personnelles du Vault
+# DonnÃ©es personnelles du Vault
 raw/
 images/
 .temp/
@@ -22,5 +22,8 @@ vault.db
 vault.db-journal
 exports/
 
-# Inbox mobile - donn�es personnelles
+# Inbox mobile - données personnelles
 mobile-inbox/
+
+# Logs locaux du worker d'analyse
+logs/
