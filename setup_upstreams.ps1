@@ -8,6 +8,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $External = Join-Path $Root "external"
 $AgencyDir = Join-Path $External "agency-agents"
 $ReelsUpstreamDir = Join-Path $External "reels-vault-upstream"
+$JarvisUpstreamDir = Join-Path $External "jarvis-assistant-vocal"
 
 New-Item -ItemType Directory -Force -Path $External | Out-Null
 
@@ -37,8 +38,10 @@ function Sync-Repo {
 
 Sync-Repo -Url "https://github.com/msitarzewski/agency-agents.git" -Path $AgencyDir
 Sync-Repo -Url "https://github.com/sosoj92/reels-vault.git" -Path $ReelsUpstreamDir
+Sync-Repo -Url "https://github.com/sosoj92/jarvis-assistant-vocal.git" -Path $JarvisUpstreamDir
 
 Write-Host ""
 Write-Host "Upstreams ready:"
 Write-Host "  Agency Agents : $AgencyDir"
 Write-Host "  Reels Vault   : $ReelsUpstreamDir"
+Write-Host "  Jarvis        : $JarvisUpstreamDir"
