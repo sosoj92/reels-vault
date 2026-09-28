@@ -342,7 +342,7 @@ _RECALL_STOPWORDS = {
     "par", "chez", "vers", "entre", "sans", "sous", "est", "sont", "etait",
     "c", "n", "ne", "pas", "plus", "tout", "tous", "toute", "toutes", "tres",
     "quel", "quelle", "quels", "quelles", "comment", "combien", "pourquoi",
-    "quand", "chose", "choses", "truc", "trucs", "quelque", "sujet", "propos",
+    "quand", "chose", "choses", "moins", "trop", "bien", "vraiment", "aussi", "encore", "truc", "trucs", "quelque", "sujet", "propos",
     "concernant", "niveau", "the", "and", "for", "with", "from", "that",
     "this", "what", "about", "my", "i", "did", "have", "had", "saved",
     # verbes / formules de rappel
@@ -387,6 +387,8 @@ _SYNONYMS = {
     "hebergement": ("hebergeur", "hosting", "serveur", "server"),
     "securite": ("security", "pentest", "pentester", "hacker"),
     "argent": ("money", "finance", "revenu", "revenus"),
+    "immobilier": ("villa", "appartement", "maison", "logement", "sci", "spv",
+                   "real", "estate"),
 }
 _SYNONYM_WEIGHT = 0.6
 # Traductions exactes : quasi equivalentes au terme d'origine.
@@ -807,61 +809,235 @@ def search_saved_sources(conn, q, *, limit=8, min_relative=0.25):
     results = []
     seen = set()
     for item in ranked:
-        doc = item["doc"]
-        title = doc.get("c_title") or doc.get("s_title") or ""
-        author = doc.get("s_author") or doc.get("c_author") or ""
-        keys = {
-            ("url", doc.get("source_url")),
-            ("title", _fold(title), _fold(author)),
-        }
+        keys = _dedupe_keys(item["doc"])
         if keys & seen:
             continue
         seen |= keys
-
-        description = _best_description({
-            field: doc.get(f"c_{field}")
-            for field in ("description_manual", "description_ai",
-                          "description_original")
-        })
-        transcript_excerpt = ""
-        if "transcript" in item["matched_fields"]:
-            transcript_excerpt = _excerpt_around(
-                doc.get("c_transcript"), item["matched_tokens"]
-            )
-        snippet = _cut(description, 320) or transcript_excerpt or _cut(
-            doc.get("c_transcript"), 220
-        )
-
-        results.append({
-            "source_id": int(doc["source_id"]),
-            "id": int(doc["source_id"]),
-            "content_id": doc.get("s_content_id"),
-            "title": title,
-            "url": doc.get("source_url") or doc.get("c_source_url"),
-            "source_url": doc.get("source_url") or doc.get("c_source_url"),
-            "platform": doc.get("s_platform") or doc.get("c_platform"),
-            "source_type": doc.get("s_source_type"),
-            "author": author or None,
-            "category": doc.get("c_category"),
-            "tags": doc.get("tags") or [],
-            "resources": doc.get("resources") or [],
-            "captured_at": doc.get("s_captured_at"),
-            "snippet": snippet,
-            "transcript_excerpt": transcript_excerpt,
-            "matched_tokens": item["matched_tokens"],
-            "matched_fields": item["matched_fields"],
-            "score": item["score"],
-            "coverage": item["coverage"],
-            "match": {
-                "score": item["score"],
-                "matched_tokens": item["matched_tokens"],
-                "matched_fields": item["matched_fields"],
-                "coverage": item["coverage"],
-            },
-        })
+        results.append(_result_from_doc(item["doc"], item))
         if len(results) >= limit:
             break
     return results
+
+
+def _dedupe_keys(doc):
+    title = doc.get("c_title") or doc.get("s_title") or ""
+    author = doc.get("s_author") or doc.get("c_author") or ""
+    return {
+        ("url", doc.get("source_url")),
+        ("title", _fold(title), _fold(author)),
+    }
+
+
+def _result_from_doc(doc, item, excerpt=None):
+    """Resultat cite (provenance complete) a partir d'un document charge."""
+    title = doc.get("c_title") or doc.get("s_title") or ""
+    author = doc.get("s_author") or doc.get("c_author") or ""
+    description = _best_description({
+        field: doc.get(f"c_{field}")
+        for field in ("description_manual", "description_ai",
+                      "description_original")
+    })
+    # Champ d'origine de l'extrait : une description MANUELLE est une note
+    # personnelle et ne doit jamais partir vers un provider cloud.
+    description_field = next(
+        (field for field in ("description_manual", "description_ai", "description_original")
+         if _clean(doc.get(f"c_{field}"))),
+        None,
+    )
+    transcript_excerpt = excerpt or ""
+    if not transcript_excerpt and "transcript" in item["matched_fields"]:
+        transcript_excerpt = _excerpt_around(
+            doc.get("c_transcript"), item["matched_tokens"]
+        )
+    snippet = _cut(description, 320) or transcript_excerpt or _cut(
+        doc.get("c_transcript"), 220
+    )
+    return {
+        "source_id": int(doc["source_id"]),
+        "id": int(doc["source_id"]),
+        "content_id": doc.get("s_content_id"),
+        "title": title,
+        "url": doc.get("source_url") or doc.get("c_source_url"),
+        "source_url": doc.get("source_url") or doc.get("c_source_url"),
+        "platform": doc.get("s_platform") or doc.get("c_platform"),
+        "source_type": doc.get("s_source_type"),
+        "author": author or None,
+        "category": doc.get("c_category"),
+        "tags": doc.get("tags") or [],
+        "resources": doc.get("resources") or [],
+        "captured_at": doc.get("s_captured_at"),
+        "snippet": snippet,
+        "snippet_field": (
+            description_field if _cut(description, 320) else
+            ("transcript" if snippet else None)
+        ),
+        "transcript_excerpt": transcript_excerpt,
+        "matched_tokens": item["matched_tokens"],
+        "matched_fields": item["matched_fields"],
+        "score": item["score"],
+        "coverage": item["coverage"],
+        "match": {
+            "score": item["score"],
+            "matched_tokens": item["matched_tokens"],
+            "matched_fields": item["matched_fields"],
+            "coverage": item["coverage"],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Recherche HYBRIDE (V2) : lexical + semantique local.
+#
+# - le lexical reste le moteur principal et garde ses filtres ;
+# - le semantique reordonne les resultats lexicaux (fusion ponderee) ;
+# - une source trouvee UNIQUEMENT par le sens n'est admise que si elle se
+#   detache nettement (z >= vault_embeddings.SEMANTIC_ONLY_MIN_Z, corpus
+#   suffisant) et elle est marquee match_type="semantic" (a verifier) ;
+# - embeddings indisponibles, index vide ou trop lent : fallback lexical.
+# ---------------------------------------------------------------------------
+
+LEXICAL_WEIGHT = 0.75
+SEMANTIC_WEIGHT = 0.25
+MAX_SEMANTIC_ONLY = 2
+# Veto semantique d'une correspondance lexicale faible : plus l'indice
+# lexical est mince, plus la confirmation semantique doit etre forte.
+# (couverture maximale, z minimal requis pour garder le resultat)
+SEMANTIC_VETO_TIERS = ((0.25, 2.0), (0.5, 1.0))
+
+
+def _vetoed(coverage, z):
+    for max_coverage, min_z in SEMANTIC_VETO_TIERS:
+        if coverage < max_coverage:
+            return z < min_z
+    return False
+
+
+def _semantic_norm(z):
+    # z = 1 -> 0 ; z = 3 -> 1 (bornes du banc d'essai).
+    return max(0.0, min(1.0, (z - 1.0) / 2.0))
+
+
+def _run_with_timeout(func, timeout):
+    import threading
+
+    box = {}
+
+    def target():
+        try:
+            box["value"] = func()
+        except Exception as exc:  # noqa: BLE001 - remonte en fallback lexical
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        return None, "timeout"
+    if "error" in box:
+        return None, f"error:{type(box['error']).__name__}"
+    return box.get("value"), "ok"
+
+
+def search_sources_hybrid(conn, q, *, limit=8, semantic="auto", backend=None,
+                          semantic_timeout=8.0):
+    """
+    Recherche hybride. Retourne (results, info) ; chaque resultat garde la
+    provenance complete et un bloc "retrieval" explicite.
+    """
+    import vault_embeddings as embeddings
+
+    lexical = search_saved_sources(conn, q, limit=max(limit * 2, 12))
+    info = {"mode": "lexical", "semantic_status": "disabled"}
+    if semantic == "off":
+        return lexical[:limit], info
+
+    # Lecture de l'index dans CE thread (connexion SQLite non partageable),
+    # puis seul l'encodage de la question passe sous echeance.
+    backend = backend or embeddings.default_backend()
+    rows = embeddings.load_index(conn, getattr(backend, "model", embeddings.MODEL_ID))
+    if not rows or backend is None:
+        info["semantic_status"] = "unavailable"
+        info["mode"] = "lexical_fallback"
+        return lexical[:limit], info
+    scored, status = _run_with_timeout(
+        lambda: embeddings.score_rows(rows, backend.embed_query(q)),
+        semantic_timeout,
+    )
+    if status != "ok" or not scored:
+        info["semantic_status"] = "unavailable" if status == "ok" else status
+        info["mode"] = "lexical_fallback"
+        return lexical[:limit], info
+
+    scores = scored["scores"]
+    corpus = scored["corpus_size"]
+    threshold = embeddings.semantic_threshold(
+        conn, getattr(backend, "model", embeddings.MODEL_ID))
+    info.update({"mode": "hybrid", "semantic_status": "ok", "corpus_size": corpus,
+                 "semantic_only_min_z": round(threshold, 3)})
+
+    results = []
+    vetoed = []
+    top_lexical = lexical[0]["score"] if lexical else 0.0
+    for item in lexical:
+        sem = scores.get(item["source_id"])
+        # Correspondance lexicale FAIBLE (moins de la moitie de la question)
+        # et semantique clairement sans rapport : faux positif ecarte
+        # (ex. "resultats du match de football" -> "voila le resultat").
+        if sem and _vetoed(item["coverage"], sem["z"]):
+            vetoed.append(item["source_id"])
+            continue
+        lex_norm = item["score"] / top_lexical if top_lexical else 0.0
+        sem_norm = _semantic_norm(sem["z"]) if sem else 0.0
+        item = dict(item)
+        item["retrieval"] = {
+            "match_type": "hybrid" if sem and sem_norm > 0 else "lexical",
+            "lexical_score": item["score"],
+            "semantic_cos": round(sem["cos"], 4) if sem else None,
+            "semantic_z": round(sem["z"], 2) if sem else None,
+            "fused": round(LEXICAL_WEIGHT * lex_norm + SEMANTIC_WEIGHT * sem_norm, 4),
+        }
+        results.append(item)
+
+    # Sources absentes du lexical, admises seulement si elles se detachent.
+    if corpus >= embeddings.MIN_CORPUS_FOR_SEMANTIC_ONLY:
+        known = {item["source_id"] for item in results}
+        candidates = sorted(
+            (
+                (source_id, sem) for source_id, sem in scores.items()
+                if source_id not in known and sem["z"] >= threshold
+            ),
+            key=lambda pair: -pair[1]["z"],
+        )[:MAX_SEMANTIC_ONLY]
+        if candidates:
+            documents = {int(doc["source_id"]): doc for doc in _load_documents(conn)}
+            seen = set()
+            for item in results:
+                doc = documents.get(item["source_id"])
+                if doc:
+                    seen |= _dedupe_keys(doc)
+            for source_id, sem in candidates:
+                doc = documents.get(source_id)
+                if not doc or _dedupe_keys(doc) & seen:
+                    continue
+                seen |= _dedupe_keys(doc)
+                result = _result_from_doc(
+                    doc,
+                    {"score": 0.0, "coverage": 0.0, "matched_tokens": [], "matched_fields": []},
+                    excerpt=_cut(sem["chunk_text"], 240),
+                )
+                result["retrieval"] = {
+                    "match_type": "semantic",
+                    "lexical_score": None,
+                    "semantic_cos": round(sem["cos"], 4),
+                    "semantic_z": round(sem["z"], 2),
+                    # Toujours sous un resultat lexical solide.
+                    "fused": round(0.5 * _semantic_norm(sem["z"]), 4),
+                }
+                results.append(result)
+
+    info["semantic_vetoed"] = vetoed
+    results.sort(key=lambda item: (-item["retrieval"]["fused"], -item["source_id"]))
+    return results[:limit], info
 
 
 def _entities_for_sources(conn, source_ids, limit=8):
@@ -932,6 +1108,8 @@ def build_context_pack(
     sources_per_entity=4,
     relations_per_entity=6,
     direct_source_limit=8,
+    semantic="off",
+    semantic_backend=None,
 ):
     """
     Construit un paquet compact pour une IA en aval.
@@ -953,17 +1131,28 @@ def build_context_pack(
             sources_per_entity=sources_per_entity,
             relations_per_entity=relations_per_entity,
             direct_source_limit=direct_source_limit,
+            semantic=semantic,
+            semantic_backend=semantic_backend,
         )
 
 
 def _claims_capability(conn):
     claims = conn.execute("SELECT COUNT(*) FROM intelligence_claims").fetchone()[0]
     relations = conn.execute("SELECT COUNT(*) FROM intelligence_relations").fetchone()[0]
+    structured = 0
+    if _table_exists(conn, "intelligence_claim_structure"):
+        structured = conn.execute(
+            "SELECT COUNT(*) FROM intelligence_claim_structure WHERE superseded_at IS NULL"
+        ).fetchone()[0]
     return {
         "claims_count": claims,
+        "structured_claims_count": structured,
         "relations_count": relations,
-        # Pas de claims structurees = pas de detection de contradiction.
-        "contradiction_detection": "available" if claims else "unavailable_no_structured_claims",
+        # Sans claims STRUCTURES (sujet/predicat/objet/portee/date), aucune
+        # contradiction ne peut etre affirmee : pas de faux positif.
+        "contradiction_detection": (
+            "available" if structured else "unavailable_no_structured_claims"
+        ),
     }
 
 
@@ -976,6 +1165,8 @@ def _build_context_pack(
     sources_per_entity,
     relations_per_entity,
     direct_source_limit,
+    semantic="off",
+    semantic_backend=None,
 ):
     phrase, tokens = _query_parts(q)
     # Couche en lecture : on ne cree le schema que s'il manque (base neuve),
@@ -989,11 +1180,14 @@ def _build_context_pack(
         if token not in _RECALL_STOPWORDS
     ]
 
-    direct_sources = search_saved_sources(
-        conn,
-        q,
-        limit=max(1, min(int(direct_source_limit), 20)),
-    )
+    source_limit = max(1, min(int(direct_source_limit), 20))
+    if semantic == "off":
+        direct_sources = search_saved_sources(conn, q, limit=source_limit)
+        retrieval_info = {"mode": "lexical", "semantic_status": "disabled"}
+    else:
+        direct_sources, retrieval_info = search_sources_hybrid(
+            conn, q, limit=source_limit, semantic=semantic, backend=semantic_backend,
+        )
 
     entity_limit = max(1, min(int(entity_limit), 20))
     claims_per_entity = max(1, min(int(claims_per_entity), 20))
@@ -1056,6 +1250,7 @@ def _build_context_pack(
     return {
         "query": q.strip(),
         "retrieval": "source_first",
+        "retrieval_info": retrieval_info,
         "query_terms": [item["term"] for item in query_terms(q)],
         "source_result_count": len(direct_sources),
         "sources": direct_sources,

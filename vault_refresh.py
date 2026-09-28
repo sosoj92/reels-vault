@@ -60,7 +60,7 @@ def _run_migration(vault_path, db_path):
         )
 
 
-def refresh(vault_path, db_path, *, sync_notion=True):
+def refresh(vault_path, db_path, *, sync_notion=True, index_semantic=True):
     vault_path = Path(vault_path).resolve()
     db_path = Path(db_path).resolve()
 
@@ -112,8 +112,28 @@ def refresh(vault_path, db_path, *, sync_notion=True):
                     "reason": "NOTION_TOKEN missing",
                 }
 
+        # V2 : index semantique incremental (modele local, quelques
+        # centaines de ms par nouvelle source). Jamais bloquant : une erreur
+        # laisse simplement la recherche en mode lexical.
+        semantic_index = {"status": "skipped", "reason": "disabled"}
+        if index_semantic:
+            try:
+                import vault_embeddings
+
+                backend = vault_embeddings.default_backend()
+                if backend is None:
+                    semantic_index = {"status": "skipped", "reason": "model_unavailable"}
+                else:
+                    semantic_index = {
+                        "status": "indexed",
+                        **vault_embeddings.index_sources(conn, backend),
+                    }
+            except Exception as exc:  # noqa: BLE001 - etape optionnelle
+                semantic_index = {"status": "error", "reason": type(exc).__name__}
+
         return {
             "db": str(db_path),
+            "semantic_index": semantic_index,
             "promotion": {
                 "contents_promoted": promoted["contents_promoted"],
                 "resources_promoted": promoted["resources_promoted"],
@@ -160,12 +180,18 @@ def main():
         action="store_true",
         help="ne pas synchroniser le cockpit Notion",
     )
+    parser.add_argument(
+        "--skip-semantic-index",
+        action="store_true",
+        help="ne pas mettre a jour l'index semantique local",
+    )
     args = parser.parse_args()
 
     result = refresh(
         args.vault,
         args.db,
         sync_notion=not args.skip_notion,
+        index_semantic=not args.skip_semantic_index,
     )
     print("\nLife Intelligence refresh:")
     print(json.dumps(result, ensure_ascii=False, indent=2))

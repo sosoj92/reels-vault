@@ -172,20 +172,68 @@ def _is_sensitive(question, sources, routes):
     )
 
 
+def _source_lines(source):
+    title = _clean_title(source.get("title"))
+    meta = []
+    if source.get("author"):
+        meta.append("@" + str(source["author"]).lstrip("@"))
+    platform = _platform_label(source.get("platform"))
+    if platform:
+        meta.append(platform)
+    head = f"- « {title} »"
+    if meta:
+        head += f" ({', '.join(meta)})"
+    excerpt = _best_excerpt(source)
+    if excerpt and context_layer._fold(excerpt) != context_layer._fold(title):
+        head += f" : {excerpt}"
+    lines = [head]
+    if source.get("url"):
+        lines.append(f"  {source['url']}")
+    return lines
+
+
+_ASSESSMENT_LABELS = {
+    "convergence": "Convergence",
+    "contradiction": "Contradiction à vérifier",
+    "possible_tension": "Tension possible (non confirmée)",
+    "possible_supersession": "Information possiblement remplacée",
+    "reactivation": "Ancienne information redevenue pertinente",
+}
+
+
 def render_answer(question, sources, *, mentor=None, sensitive=False,
-                  capabilities=None, agents=None, mode="ask"):
-    """Reponse deterministe : uniquement des faits presents dans le Vault."""
+                  capabilities=None, agents=None, mode="ask", related=None,
+                  assessments=None):
+    """
+    Reponse deterministe : uniquement des faits presents dans le Vault.
+
+    related : sources trouvees uniquement par proximite de sens (V2), toujours
+    presentees a part et "a verifier".
+    assessments : convergences / contradictions / remplacements traces (V2).
+    """
     mentor = mentor or {}
     capabilities = capabilities or {}
+    related = related or []
+    assessments = assessments or []
     topic = _topic(question)
 
     if not sources:
         lines = [
             f"Je n'ai trouvé aucune source suffisamment pertinente dans ton "
             f"Vault sur « {topic} ».",
-            "Je préfère ne rien inventer : essaie un autre mot-clé "
-            "(nom d'outil, auteur, thème).",
         ]
+        if related:
+            lines.append(
+                "Rapprochement de sens uniquement (aucun mot de ta question n'y "
+                "figure, pertinence à vérifier) :"
+            )
+            for source in related:
+                lines.extend(_source_lines(source))
+        else:
+            lines.append(
+                "Je préfère ne rien inventer : essaie un autre mot-clé "
+                "(nom d'outil, auteur, thème)."
+            )
         if mode == "consult" and agents:
             lines.append(
                 "Agents qui auraient été sollicités : " + ", ".join(agents) + "."
@@ -194,22 +242,11 @@ def render_answer(question, sources, *, mentor=None, sensitive=False,
 
     lines = ["Tu avais notamment sauvegardé :"]
     for source in sources:
-        title = _clean_title(source.get("title"))
-        meta = []
-        if source.get("author"):
-            meta.append("@" + str(source["author"]).lstrip("@"))
-        platform = _platform_label(source.get("platform"))
-        if platform:
-            meta.append(platform)
-        head = f"- « {title} »"
-        if meta:
-            head += f" ({', '.join(meta)})"
-        excerpt = _best_excerpt(source)
-        if excerpt and context_layer._fold(excerpt) != context_layer._fold(title):
-            head += f" : {excerpt}"
-        lines.append(head)
-        if source.get("url"):
-            lines.append(f"  {source['url']}")
+        lines.extend(_source_lines(source))
+    if related:
+        lines.append("Peut-être lié (rapprochement de sens, à vérifier) :")
+        for source in related:
+            lines.extend(_source_lines(source))
 
     # "Pourquoi c'est utile" : uniquement des signaux deja calcules.
     reasons = []
@@ -250,6 +287,14 @@ def render_answer(question, sources, *, mentor=None, sensitive=False,
     if reasons:
         lines.append("")
         lines.append("Pourquoi elles peuvent t'être utiles : " + " ; ".join(reasons) + ".")
+
+    if assessments:
+        lines.append("")
+        lines.append("Ce que les affirmations extraites montrent :")
+        for item in assessments[:4]:
+            label = _ASSESSMENT_LABELS.get(item["kind"], item["kind"])
+            refs = ", ".join(f"source {sid}" for sid in item["source_ids"])
+            lines.append(f"- {label} : {item['summary']} ({refs})")
 
     if sensitive:
         lines.append("")
@@ -324,7 +369,7 @@ def _synthesis_prompt(question, sources, agents):
     return system, user
 
 
-def _ollama_chat(system, user, num_predict=130):
+def _ollama_chat(system, user, num_predict=130, timeout=120):
     payload = {
         "model": LOCAL_MODEL,
         "stream": False,
@@ -345,7 +390,9 @@ def _ollama_chat(system, user, num_predict=130):
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    # Le socket se ferme a l'echeance : Ollama voit la deconnexion et
+    # abandonne la generation au lieu de saturer le CPU pour rien.
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = json.load(resp)
     text = str(raw.get("message", {}).get("content") or "")
     # Par securite si un modele "thinking" renvoie ses balises.
@@ -367,7 +414,8 @@ def synthesize_local(question, sources, agents, timeout):
         return None, {"status": "unavailable", "model": LOCAL_MODEL}
     system, user = _synthesis_prompt(question, sources, agents)
     started = time.perf_counter()
-    text, status = _run_with_deadline(lambda: _ollama_chat(system, user), timeout)
+    text, status = _run_with_deadline(
+        lambda: _ollama_chat(system, user, timeout=max(1.0, timeout)), timeout + 1.0)
     info = {
         "status": status,
         "model": LOCAL_MODEL,
@@ -380,11 +428,61 @@ def synthesize_local(question, sources, agents, timeout):
     return _cut(_complete_sentences(text), 700), info
 
 
-# Point d'extension : un provider cloud (OpenAI, Claude...) pourra etre ajoute
-# ici plus tard avec la meme signature, sans modifier ask(). Aucun n'est
-# requis en V1 : les cles ne sont pas configurees.
+def public_only(sources):
+    """
+    Copies des sources sans note personnelle : si l'extrait vient de la
+    description manuelle de l'utilisateur, il est remplace par l'extrait de
+    transcript (public) ou retire. Utilise avant tout envoi cloud.
+    """
+    cleaned = []
+    for source in sources:
+        item = dict(source)
+        if item.get("snippet_field") == "description_manual":
+            item["snippet"] = item.get("transcript_excerpt") or ""
+            item["snippet_field"] = "transcript" if item["snippet"] else None
+        cleaned.append(item)
+    return cleaned
+
+
+def synthesize_cloud(question, sources, agents, timeout):
+    """
+    Synthese via l'adapter cloud (vault_cloud). Sans cle configuree : renvoie
+    immediatement "unavailable", la reponse deterministe reste intacte.
+    Seuls des extraits PUBLICS des sources (titre, extrait) sont envoyes.
+    """
+    import vault_cloud
+
+    provider = vault_cloud.get_provider()
+    if provider is None:
+        return None, {"status": "unavailable", "provider": None}
+    system, user = _synthesis_prompt(question, public_only(sources), agents)
+    started = time.perf_counter()
+    try:
+        response = provider.complete(system, user, max_tokens=1024, timeout=timeout)
+    except vault_cloud.CloudError as exc:
+        return None, {
+            "status": "error",
+            "provider": provider.name,
+            "reason": vault_cloud.redact(str(exc))[:200],
+            "elapsed_s": round(time.perf_counter() - started, 1),
+        }
+    text = " ".join(str(response.text or "").split())
+    info = {
+        "status": "ok" if text else "empty",
+        "provider": provider.name,
+        "model": response.model,
+        "label": f"cloud ({provider.name}:{response.model})",
+        "elapsed_s": round(time.perf_counter() - started, 1),
+    }
+    return (_cut(_complete_sentences(text), 700) if text else None), info
+
+
+# Point d'extension : chaque synthetiseur a la meme signature
+# (question, sources, agents, timeout) -> (texte | None, info).
+# "local" = Qwen via Ollama ; "cloud" = vault_cloud (Claude aujourd'hui).
 SYNTHESIZERS = {
     "local": synthesize_local,
+    "cloud": synthesize_cloud,
 }
 
 
@@ -409,13 +507,44 @@ def _agent_lenses(question, requested_agent=None, max_agents=3):
         return [], []
 
 
+def _claim_assessments(conn, source_ids):
+    """Convergences / contradictions tracees touchant ces sources (V2)."""
+    if not source_ids:
+        return []
+    try:
+        import vault_claim_reasoning as reasoning
+
+        return reasoning.assessments_for_sources(conn, source_ids)
+    except Exception:
+        # Enrichissement : son absence ne bloque jamais Ask.
+        return []
+
+
+def _synthesizer_order():
+    """
+    VAULT_ASK_SYNTHESIZER :
+    - "local" (defaut) : Qwen local uniquement ;
+    - "cloud" : provider cloud uniquement (si une cle est configuree) ;
+    - "auto"  : local, puis cloud si le local est absent ou trop lent.
+    La reponse deterministe citee ne depend d'aucun de ces choix.
+    """
+    choice = os.environ.get("VAULT_ASK_SYNTHESIZER", "local").strip().lower()
+    if choice == "cloud":
+        return ["cloud"]
+    if choice == "auto":
+        return ["local", "cloud"]
+    return ["local"]
+
+
 def ask(conn, question, *, mode="ask", agent=None, llm="auto",
-        llm_timeout=DEFAULT_LLM_TIMEOUT, max_sources=MAX_SOURCES):
+        llm_timeout=DEFAULT_LLM_TIMEOUT, max_sources=MAX_SOURCES,
+        semantic="auto", semantic_backend=None):
     """
     Repond a une question de rappel personnel a partir du Vault.
 
-    mode : "ask" (rappel) ou "consult" (consultation des agents du Vault).
-    llm  : "auto" (Qwen local si disponible, sous echeance) ou "off".
+    mode     : "ask" (rappel) ou "consult" (consultation des agents du Vault).
+    llm      : "auto" (synthese si disponible, sous echeance) ou "off".
+    semantic : "auto" (recherche hybride si l'index existe) ou "off".
     """
     started = time.perf_counter()
     question = " ".join(str(question or "").split())
@@ -424,16 +553,26 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
 
     pack = context_layer.build_context_pack(
         conn, question, direct_source_limit=max(max_sources * 2, 8),
+        semantic=semantic, semantic_backend=semantic_backend,
     )
-    sources = [
+    lexical = [
         s for s in pack["sources"]
-        if pack["sources"] and s["score"] >= pack["sources"][0]["score"] * MIN_RELATIVE_SCORE
+        if (s.get("retrieval") or {}).get("match_type") != "semantic"
+    ]
+    top_lexical = max((s["score"] for s in lexical), default=0.0)
+    sources = [
+        s for s in lexical if s["score"] >= top_lexical * MIN_RELATIVE_SCORE
     ][:max_sources]
+    related = [
+        s for s in pack["sources"]
+        if (s.get("retrieval") or {}).get("match_type") == "semantic"
+    ][:2]
     retrieval_ms = round((time.perf_counter() - started) * 1000)
 
     agents, routes = _agent_lenses(question, agent)
-    sensitive = _is_sensitive(question, sources, routes)
+    sensitive = _is_sensitive(question, sources + related, routes)
     mentor = _mentor_status(conn, [s["source_id"] for s in sources])
+    assessments = _claim_assessments(conn, [s["source_id"] for s in sources])
 
     answer = render_answer(
         question,
@@ -443,9 +582,12 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
         capabilities=pack.get("capabilities"),
         agents=agents,
         mode=mode,
+        related=related,
+        assessments=assessments,
     )
 
     synthesis = None
+    synthesizer = _synthesizer_order()
     if llm == "off":
         llm_info = {"status": "disabled"}
     elif not sources:
@@ -453,16 +595,22 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
     elif sensitive:
         # Sante / finance / droit : un petit modele local invente trop
         # facilement (observe : "la guanfacine est une stimulante", faux).
-        # La reponse citee + l'avertissement suffisent en V1.
+        # La reponse citee + l'avertissement suffisent.
         llm_info = {"status": "skipped_sensitive"}
     else:
-        synthesis, llm_info = SYNTHESIZERS["local"](
-            question, sources, agents if mode == "consult" else [], llm_timeout,
-        )
-        if synthesis:
-            answer += (
-                f"\n\nSynthèse locale ({LOCAL_MODEL}, à vérifier) : {synthesis}"
+        llm_info = {"status": "skipped_no_synthesizer"}
+        attempts = []
+        for name in synthesizer:
+            synthesis, llm_info = SYNTHESIZERS[name](
+                question, sources, agents if mode == "consult" else [], llm_timeout,
             )
+            attempts.append({"synthesizer": name, **llm_info})
+            if synthesis:
+                break
+        llm_info = {**llm_info, "attempts": attempts}
+        if synthesis:
+            label = llm_info.get("label") or f"locale ({LOCAL_MODEL})"
+            answer += f"\n\nSynthèse {label}, à vérifier : {synthesis}"
 
     return {
         "question": question,
@@ -474,11 +622,23 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
                 for key in (
                     "source_id", "content_id", "title", "url", "platform",
                     "author", "category", "snippet", "matched_tokens",
-                    "matched_fields", "score",
+                    "matched_fields", "score", "retrieval",
                 )
             }
             for source in sources
         ],
+        "related_sources": [
+            {
+                key: source.get(key)
+                for key in (
+                    "source_id", "content_id", "title", "url", "platform",
+                    "author", "category", "snippet", "retrieval",
+                )
+            }
+            for source in related
+        ],
+        "retrieval": pack.get("retrieval_info"),
+        "assessments": assessments,
         "linked_entities": [e["name"] for e in pack.get("linked_entities", [])],
         "agents": agents,
         "routes": [r.get("route") for r in routes],
