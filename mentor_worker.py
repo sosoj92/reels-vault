@@ -955,13 +955,154 @@ def run(limit=5, confirm=False, threshold=0.55, source_id=None):
         conn.close()
 
 
+REASSESS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS intelligence_mentor_v2_reassessment (
+    source_id          INTEGER PRIMARY KEY,
+    content_id         INTEGER,
+    v1_outcome         TEXT,
+    v1_relevance       REAL,
+    had_insight        INTEGER NOT NULL DEFAULT 0,
+    borderline         INTEGER NOT NULL DEFAULT 0,
+    borderline_reasons TEXT NOT NULL DEFAULT '[]',
+    v2_outcome         TEXT,
+    v2_relevance       REAL,
+    v2_confidence      REAL,
+    decision           TEXT NOT NULL,
+    review_reason      TEXT,
+    analysis_model     TEXT,
+    reassessed_at      TEXT NOT NULL
+)
+"""
+
+
+def reassess(source_ids=None, limit=None, confirm=False, force=False):
+    """
+    Deploiement V2 : re-evalue en V2 des sources DEJA traitees en V1.
+
+    - cas borderline : double Agency + trace de consensus ;
+    - si la V2 conclut a la review : ajout a la file de review avec une
+      raison "v2_backfill:..." ;
+    - le traitement V1 (intelligence_mentor_processing) et les insights
+      existants ne sont JAMAIS modifies : rien ne change dans Notion ;
+    - chaque source re-evaluee est tracee (intelligence_mentor_v2_reassessment),
+      ce qui rend l'operation idempotente et reprenable.
+    """
+    if confirm and not ollama_available():
+        print(json.dumps({"writes_performed": False, "deferred": True,
+                          "reason": "Ollama indisponible"}, ensure_ascii=False))
+        return None
+    conn = connect()
+    try:
+        if confirm:
+            v2_guard.require_v2_writes(conn, "re-evaluation V2 du Mentor")
+            ensure_schema(conn)
+            mentor_review.ensure_schema(conn, v2=True)
+            conn.execute(REASSESS_SCHEMA)
+            conn.commit()
+        has_trace = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='intelligence_mentor_v2_reassessment'"
+        ).fetchone()
+        rows = conn.execute("""
+            SELECT
+                s.id AS source_id, s.source_url, s.platform, s.title AS source_title,
+                s.author, s.content_id, s.created_at, c.title, c.description_original,
+                c.description_ai, c.description_manual, c.transcript,
+                p.outcome AS v1_outcome, p.relevance_score AS v1_relevance,
+                (SELECT COUNT(*) FROM intelligence_mentor_insights_local i
+                  WHERE i.source_id = s.id) AS had_insight
+            FROM intelligence_sources s
+            JOIN contents c ON c.id = s.content_id
+            JOIN intelligence_mentor_processing p ON p.source_id = s.id
+            ORDER BY s.id
+        """).fetchall()
+        done = set()
+        if has_trace and not force:
+            done = {r[0] for r in conn.execute(
+                "SELECT source_id FROM intelligence_mentor_v2_reassessment")}
+        selected = [
+            r for r in rows
+            if (source_ids is None or r["source_id"] in source_ids)
+            and r["source_id"] not in done
+        ]
+        if limit is not None:
+            selected = selected[:limit]
+
+        items = []
+        for row in selected:
+            analysis = classify(conn, row, v2=True)
+            consensus = analysis.get("consensus")
+            decision = (
+                "review" if analysis["review_required"]
+                else "publishable" if analysis["publishable"] else "not_publishable"
+            )
+            item = {
+                "source_id": row["source_id"],
+                "title": row["title"] or row["source_title"],
+                "v1_outcome": row["v1_outcome"],
+                "v1_relevance": row["v1_relevance"],
+                "had_insight": bool(row["had_insight"]),
+                "borderline": bool(consensus),
+                "borderline_reasons": (consensus or {}).get("borderline_reasons", []),
+                "v2_outcome": analysis["outcome"],
+                "v2_relevance": analysis["score"],
+                "v2_confidence": analysis["final_confidence"],
+                "decision": decision,
+                "review_reason": analysis["review_reason"],
+                "analysis_model": analysis["analysis_model"],
+                "agency_run_1": (consensus or {}).get("agency_run_1"),
+                "agency_run_2": (consensus or {}).get("agency_run_2"),
+            }
+            items.append(item)
+            if not confirm:
+                continue
+            if consensus:
+                mentor_review.record_consensus(conn, row, analysis)
+            if analysis["review_required"]:
+                mentor_review.enqueue(
+                    conn, row, analysis,
+                    reason="v2_backfill:" + (analysis["review_reason"] or "review"),
+                )
+            conn.execute(
+                """
+                INSERT INTO intelligence_mentor_v2_reassessment(
+                    source_id, content_id, v1_outcome, v1_relevance, had_insight,
+                    borderline, borderline_reasons, v2_outcome, v2_relevance,
+                    v2_confidence, decision, review_reason, analysis_model, reassessed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    borderline = excluded.borderline,
+                    borderline_reasons = excluded.borderline_reasons,
+                    v2_outcome = excluded.v2_outcome,
+                    v2_relevance = excluded.v2_relevance,
+                    v2_confidence = excluded.v2_confidence,
+                    decision = excluded.decision,
+                    review_reason = excluded.review_reason,
+                    analysis_model = excluded.analysis_model,
+                    reassessed_at = excluded.reassessed_at
+                """,
+                (row["source_id"], row["content_id"], row["v1_outcome"], row["v1_relevance"],
+                 int(bool(row["had_insight"])), int(bool(consensus)),
+                 json.dumps(item["borderline_reasons"]), analysis["outcome"],
+                 analysis["score"], analysis["final_confidence"], decision,
+                 analysis["review_reason"], analysis["analysis_model"], utcnow()),
+            )
+            # Commit par source : reprenable si interrompu.
+            conn.commit()
+        result = {"writes_performed": confirm, "reassessed": len(items), "items": items}
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
         "--limit",
         type=int,
-        default=5
+        default=None,
+        help="nombre de sources (defaut : 5 ; avec --reassess : toutes)",
     )
 
     parser.add_argument(
@@ -981,13 +1122,34 @@ if __name__ == "__main__":
         help="re-analyse a blanc d'une source precise (aucune ecriture)",
     )
 
+    parser.add_argument(
+        "--reassess",
+        action="store_true",
+        help="deploiement V2 : re-evaluer des sources deja traitees en V1",
+    )
+
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="avec --reassess : re-evaluer aussi les sources deja re-evaluees",
+    )
+
     args = parser.parse_args()
+
+    if args.reassess:
+        reassess(
+            source_ids=[args.source_id] if args.source_id is not None else None,
+            limit=args.limit,
+            confirm=args.confirm,
+            force=args.force,
+        )
+        raise SystemExit(0)
 
     if args.source_id is not None and args.confirm:
         parser.error("--source-id est une analyse a blanc : --confirm interdit")
 
     run(
-        limit=args.limit,
+        limit=args.limit if args.limit is not None else 5,
         confirm=args.confirm,
         threshold=args.threshold,
         source_id=args.source_id,

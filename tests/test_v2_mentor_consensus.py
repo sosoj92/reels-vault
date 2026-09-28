@@ -199,6 +199,105 @@ class WorkerConsensusTests(unittest.TestCase):
         self.assertTrue(item["publishable"])
 
 
+class ReassessExistingSourcesTests(unittest.TestCase):
+    """Deploiement V2 : re-evaluation des sources deja traitees en V1."""
+
+    def setUp(self):
+        self.path = _isolation.TMP / f"reassess_{self._testMethodName}.db"
+        conn = make_db(str(self.path))
+        self.source_id = add_source(conn, "https://example.test/old",
+                                    "Outil de prospection LinkedIn", transcript=TEXT)
+        mentor_worker.ensure_schema(conn)
+        import mentor_notion_sync
+        mentor_notion_sync.ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO intelligence_mentor_processing(source_id, content_id, outcome, "
+            "relevance_score, processed_at) VALUES (?, ?, 'opportunity', 0.75, 'v1')",
+            (self.source_id, self.source_id))
+        conn.execute(
+            "INSERT INTO intelligence_mentor_insights_local(source_id, insight_type, observation, "
+            "relevance_score, created_at, updated_at, notion_page_id) "
+            "VALUES (?, 'opportunity', 'obs V1', 0.75, 'v1', 'v1', 'notion-page-v1')",
+            (self.source_id,))
+        conn.commit()
+        conn.close()
+        self.calls = []
+        self.patches = [
+            mock.patch.object(mentor_worker, "DB", str(self.path)),
+            mock.patch.object(mentor_worker, "ollama_available", return_value=True),
+            mock.patch.object(mentor_worker, "qwen_analyze", return_value=dict(QWEN)),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+
+    def reassess(self, run2, **kwargs):
+        def fake_analyze(text, **kw):
+            self.calls.append(kw.get("variant", 1))
+            return agency() if kw.get("variant", 1) == 1 else run2
+
+        with mock.patch.object(mentor_worker.mentor_agency, "analyze", side_effect=fake_analyze):
+            with redirect_stdout(io.StringIO()):
+                return mentor_worker.reassess(**kwargs)
+
+    def snapshot_v1(self):
+        conn = sqlite3.connect(self.path)
+        try:
+            return (conn.execute("SELECT * FROM intelligence_mentor_processing").fetchall(),
+                    conn.execute("SELECT * FROM intelligence_mentor_insights_local").fetchall())
+        finally:
+            conn.close()
+
+    def test_reassess_traces_consensus_and_queues_review_without_touching_v1(self):
+        before = self.snapshot_v1()
+        result = self.reassess(agency(classification="low_signal", relevance=0.3, variant=2),
+                               confirm=True)
+        item = result["items"][0]
+        self.assertTrue(item["borderline"])
+        self.assertEqual(item["decision"], "review")
+        self.assertEqual(self.calls, [1, 2])
+        conn = sqlite3.connect(self.path)
+        try:
+            reason = conn.execute(
+                "SELECT reason FROM intelligence_mentor_review_queue").fetchone()[0]
+            self.assertTrue(reason.startswith("v2_backfill:agency_disagreement"))
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM intelligence_mentor_consensus").fetchone()[0], 1)
+            trace = conn.execute(
+                "SELECT decision, had_insight, v1_outcome FROM intelligence_mentor_v2_reassessment"
+            ).fetchone()
+            self.assertEqual(tuple(trace), ("review", 1, "opportunity"))
+        finally:
+            conn.close()
+        # Traitement V1 et insight (deja dans Notion) intacts.
+        self.assertEqual(self.snapshot_v1(), before)
+
+    def test_reassess_is_idempotent_and_dry_run_writes_nothing(self):
+        dry = self.reassess(agency(variant=2), confirm=False)
+        self.assertEqual(dry["reassessed"], 1)
+        conn = sqlite3.connect(self.path)
+        try:
+            self.assertIsNone(conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='intelligence_mentor_v2_reassessment'"
+            ).fetchone())
+        finally:
+            conn.close()
+        self.reassess(agency(variant=2), confirm=True)
+        again = self.reassess(agency(variant=2), confirm=True)
+        self.assertEqual(again["reassessed"], 0)
+
+    def test_reassess_refused_on_locked_real_vault(self):
+        import v2_guard
+        with mock.patch.object(v2_guard, "REAL_DB", self.path), \
+                mock.patch.object(v2_guard, "FLAG", _isolation.TMP / "flag_reassess_absent"), \
+                mock.patch.dict("os.environ", {"VAULT_V2_WRITES": ""}):
+            with self.assertRaises(v2_guard.V2WritesBlocked):
+                self.reassess(agency(variant=2), confirm=True)
+
+
 class LockedRealVaultMentorTests(unittest.TestCase):
     """Verrou V2 : sur le vrai Vault non valide, le Mentor reste en V1."""
 
