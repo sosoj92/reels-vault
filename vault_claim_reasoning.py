@@ -32,6 +32,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+import v2_guard
 import vault_claims as claims_layer
 
 KINDS = ("convergence", "contradiction", "possible_tension",
@@ -71,6 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_claim_assessments_kind
 
 
 def ensure_schema(conn):
+    v2_guard.require_v2_writes(conn, "evaluations des claims")
     claims_layer.ensure_schema(conn)
     conn.executescript(SCHEMA)
     conn.commit()
@@ -480,11 +482,16 @@ def main():
     conn.row_factory = sqlite3.Row
     try:
         if args.list:
-            ensure_schema(conn)
+            # Lecture seule : ne cree aucune table.
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='intelligence_claim_assessments'"
+            ).fetchone()
             result = [dict(r) for r in conn.execute(
-                "SELECT * FROM intelligence_claim_assessments WHERE stale_at IS NULL")]
+                "SELECT * FROM intelligence_claim_assessments WHERE stale_at IS NULL")] if exists else []
         else:
             result = assess(conn)
+    except v2_guard.V2WritesBlocked as exc:
+        result = {"status": "blocked", "reason": str(exc)}
     finally:
         conn.close()
     print(json.dumps(result, ensure_ascii=False, indent=2))

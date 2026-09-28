@@ -246,5 +246,35 @@ class ReasoningTests(unittest.TestCase):
         self.assertIn(f"source {s1}", result["answer"])
 
 
+class LockedRealVaultReasoningTests(unittest.TestCase):
+    """Verrou V2 : aucune evaluation ecrite sur le vrai Vault non valide."""
+
+    def test_assess_is_blocked_and_reads_stay_available(self):
+        import hashlib
+        from unittest import mock
+
+        import _isolation
+        import v2_guard
+
+        path = _isolation.TMP / "real_reasoning.db"
+        conn = make_db(str(path))
+        source = add_source(conn, "https://a.test/r", "Astra", transcript="Astra coûte 20 dollars.")
+        conn.close()
+        digest = lambda: hashlib.sha256(path.read_bytes()).hexdigest()  # noqa: E731
+        before = digest()
+        with mock.patch.object(v2_guard, "REAL_DB", path), \
+                mock.patch.object(v2_guard, "FLAG", _isolation.TMP / "flag_reasoning"), \
+                mock.patch.dict("os.environ", {"VAULT_V2_WRITES": ""}):
+            import sqlite3
+            conn = sqlite3.connect(path)
+            try:
+                with self.assertRaises(v2_guard.V2WritesBlocked):
+                    reasoning.assess(conn, now=NOW)
+                self.assertEqual(reasoning.assessments_for_sources(conn, [source]), [])
+            finally:
+                conn.close()
+        self.assertEqual(digest(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
