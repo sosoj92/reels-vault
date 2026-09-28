@@ -30,3 +30,8 @@ logs/
 
 # Checkouts upstream locaux (Agency Agents, Reels Vault original)
 external/
+
+# Sauvegardes locales avant modification
+backups/
+*.db
+recovered_tiktok_links_*.txt

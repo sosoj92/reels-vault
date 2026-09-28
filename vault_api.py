@@ -31,6 +31,7 @@ import vault_intelligence_actions as intelligence_actions
 import vault_intelligence_context as intelligence_context
 import vault_intelligence_query as intelligence_query
 import vault_intelligence_signals as intelligence_signals
+import vault_ask
 import vault_voice_bridge as voice_bridge
 
 HOST, PORT = "127.0.0.1", int(os.environ.get("REELS_VAULT_PORT", 8765))
@@ -166,6 +167,15 @@ class TaskProviderIn(BaseModel):
 class ExportIn(BaseModel):
     content_ids: Optional[List[int]] = Field(None, description="Selection ; absent = tout le Vault")
     destination: Optional[str] = Field(None, description="Chemin de sortie ; defaut : dossier exports/")
+
+
+class AskIn(BaseModel):
+    question: str = Field(..., min_length=1, max_length=500)
+    mode: Literal["ask", "consult"] = "ask"
+    agent: Optional[str] = None
+    # Par defaut sans LLM : reponse deterministe citee, quasi immediate.
+    llm: bool = False
+    llm_timeout: float = Field(vault_ask.DEFAULT_LLM_TIMEOUT, ge=0, le=45)
 
 
 class VoiceAgentIn(BaseModel):
@@ -345,6 +355,25 @@ def intelligence_refresh_action_proposals(conn=Depends(db)):
         conn,
         max_priority=2,
     )
+
+
+@app.post(
+    "/intelligence/ask",
+    tags=["intelligence"],
+    summary="Ask Life Intelligence : recherche source-first + reponse citee (lecture seule)",
+)
+def intelligence_ask(body: AskIn, conn=Depends(db)):
+    try:
+        return vault_ask.ask(
+            conn,
+            body.question,
+            mode=body.mode,
+            agent=body.agent,
+            llm="auto" if body.llm else "off",
+            llm_timeout=body.llm_timeout,
+        )
+    except (ValueError, intelligence_context.IntelligenceContextError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @app.post(

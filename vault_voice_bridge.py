@@ -8,9 +8,12 @@ Jarvis reste la couche vocale :
 Ce module ne lance aucun micro, aucun TTS et aucune action externe.
 Il prepare seulement un paquet de raisonnement borne et traçable.
 
-Deux usages :
+Trois usages :
 - adressage explicite : "demande au Knowledge Graph Engineer..."
 - routage naturel : la demande est envoyee au plus petit ensemble d'agents utile.
+- --ask : Ask Life Intelligence RETRIEVAL-FIRST (vault_ask.py). Reponse
+  deterministe citee immediate, synthese Qwen locale optionnelle sous
+  echeance. C'est le chemin utilise par l'outil Jarvis.
 
 Les permissions et la provenance du Vault restent autoritatives.
 """
@@ -199,10 +202,13 @@ def build_voice_reasoning_prompt(
         if agent.name in selected_names
     ]
 
+    # Playbooks compacts : le markdown integral (dizaines de milliers de
+    # caracteres) faisait expirer les LLM locaux.
     playbooks = []
     for index, agent in enumerate(selected, start=1):
         playbooks.append(
-            f"--- PLAYBOOK {index}: {agent.name} ---\n{agent.markdown.strip()}"
+            f"--- PLAYBOOK {index}: {agent.name} ---\n"
+            f"{_compact_playbook(agent.markdown, max_chars=2500)}"
         )
 
     return "\n\n".join(
@@ -234,7 +240,41 @@ def main():
     parser.add_argument("--agent")
     parser.add_argument("--max-agents", type=int, default=2)
     parser.add_argument("--prompt", action="store_true")
+    parser.add_argument(
+        "--ask",
+        action="store_true",
+        help="Ask Life Intelligence retrieval-first (reponse texte citee)",
+    )
+    parser.add_argument("--mode", choices=("ask", "consult"), default="ask")
+    parser.add_argument("--no-llm", action="store_true")
+    parser.add_argument("--llm-timeout", type=float, default=None)
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+
+    if args.ask:
+        import vault_ask
+
+        conn = vault_ask.connect_readonly(args.db)
+        try:
+            result = vault_ask.ask(
+                conn,
+                " ".join(args.text),
+                mode=args.mode,
+                agent=args.agent,
+                llm="off" if args.no_llm else "auto",
+                llm_timeout=(
+                    args.llm_timeout
+                    if args.llm_timeout is not None
+                    else vault_ask.DEFAULT_LLM_TIMEOUT
+                ),
+            )
+        finally:
+            conn.close()
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(result["answer"])
+        return
 
     conn = intelligence.connect(args.db)
     try:

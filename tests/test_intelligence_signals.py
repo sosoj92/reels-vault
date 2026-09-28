@@ -223,12 +223,19 @@ class IntelligenceSignalTests(unittest.TestCase):
         self.assertNotIn(f"now_without_action:{with_action}", keys)
 
     def test_priority_filter_is_explicit(self):
-        self._entity("Needs Review", needs_review=True)
+        # Une identite provisoire ne monte en priorite 2 que si l'entite est
+        # deja "now" ; sinon elle reste en priorite 3 (file complete).
+        self._entity("Needs Review Now", status="now", needs_review=True)
+        self._entity("Needs Review Later", needs_review=True)
 
         queue = signals.collect_signals(self.conn, priority=2)
 
         self.assertTrue(queue["items"])
         self.assertTrue(all(x["priority"] == 2 for x in queue["items"]))
+
+        later = signals.collect_signals(self.conn, priority=3)
+        self.assertTrue(later["items"])
+        self.assertTrue(all(x["priority"] == 3 for x in later["items"]))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ d'orchestration reutilisable par les futurs workers / executors.
 import argparse
 import json
 import re
+import unicodedata
 from dataclasses import asdict
 
 from vault_agent_registry import AgentProfile, discover_agents
@@ -122,21 +123,204 @@ VAULT GUARDRAILS — authoritative and non-negotiable:
 
 
 def _fold(text):
-    return re.findall(r"[a-z0-9]+", (text or "").lower())
+    # Retire les accents avant de decouper : sinon "etude" devient "tude" et
+    # "sante" devient "sant", et les mots-cles francais ne matchent jamais.
+    text = unicodedata.normalize("NFKD", (text or "").lower())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.findall(r"[a-z0-9]+", text)
 
 
 def _agent_by_name(agents):
     return {agent.name.lower(): agent for agent in agents}
 
 
+
+# ---------------------------------------------------------------------------
+# Life Intelligence V1 - domain routes
+# These complement the original engineering-oriented Agency routes.
+# ---------------------------------------------------------------------------
+
+LIFE_INTELLIGENCE_ROUTES = [
+    {
+        "name": "outbound_sales",
+        "keywords": {
+            "linkedin", "prospection", "prospect", "prospects",
+            "prospecting", "outbound", "outreach", "lead", "leads",
+            "sales", "vente", "commercial", "pipeline", "crm",
+            "sequence", "cold", "icp"
+        },
+        "agents": (
+            "Outbound Strategist",
+            "Sales Outreach",
+            "Growth Hacker",
+        ),
+    },
+    {
+        "name": "tool_automation",
+        "keywords": {
+            "outil", "outils", "tool", "tools", "software", "logiciel",
+            "opensource", "open", "github", "repo", "automation",
+            "automatisation", "automatiser", "automate", "workflow",
+            "n8n", "make", "zapier", "apify", "api"
+        },
+        "agents": (
+            "Tool Evaluator",
+            "Automation Governance Architect",
+            "Workflow Optimizer",
+        ),
+    },
+    {
+        "name": "business_strategy",
+        "keywords": {
+            "business", "strategie", "strategy", "market",
+            "revenue", "revenu", "offre", "pricing", "monetisation",
+            "monetization", "client", "clients", "opportunite",
+            "competition", "concurrent"
+        },
+        "agents": (
+            "Business Strategist",
+            "Trend Researcher",
+            "Pricing Analyst",
+        ),
+    },
+    {
+        "name": "recruitment",
+        "keywords": {
+            "recrutement", "recruitment", "recruiting", "hiring",
+            "talent", "candidat", "candidate", "candidates",
+            "sourcing", "emploi", "job", "cv", "rh"
+        },
+        "agents": (
+            "Recruitment Specialist",
+            "Outbound Strategist",
+            "Business Strategist",
+        ),
+    },
+    {
+        "name": "supply_chain",
+        "keywords": {
+            "logistique", "logistics", "supply", "chain",
+            "procurement", "approvisionnement", "supplier",
+            "fournisseur", "import", "export", "transport",
+            "warehouse", "stock"
+        },
+        "agents": (
+            "Supply Chain Strategist",
+            "Operations Manager",
+            "Business Strategist",
+        ),
+    },
+    {
+        "name": "marketing_content",
+        "keywords": {
+            "marketing", "contenu", "content", "social", "instagram",
+            "tiktok", "linkedin", "seo", "audience", "acquisition",
+            "conversion", "funnel", "viral", "campaign", "campagne"
+        },
+        "agents": (
+            "Growth Hacker",
+            "Social Media Strategist",
+            "Content Creator",
+        ),
+    },
+    {
+        "name": "web_digital",
+        "keywords": {
+            "website", "site", "wordpress", "elementor", "cms",
+            "seo", "aeo", "ux", "landing", "web", "design"
+        },
+        "agents": (
+            "CMS Developer",
+            "SEO Specialist",
+            "UX Researcher",
+        ),
+    },
+    {
+        "name": "research_evidence",
+        "keywords": {
+            "research", "recherche", "study", "etude",
+            "paper", "evidence", "preuve", "claim", "clinical",
+            "clinique", "tdah", "adhd", "autism", "autisme",
+            "sante", "health", "trial", "essai"
+        },
+        "agents": (
+            "Research Synthesist",
+            "Statistician",
+            "Psychologist",
+        ),
+    },
+    {
+        "name": "finance",
+        "keywords": {
+            "finance", "financial", "budget", "cashflow", "cash",
+            "investissement", "investment", "rentabilite",
+            "margin", "marge", "cout",
+            "pricing", "forecast"
+        },
+        "agents": (
+            "Financial Analyst",
+            "FP&A Analyst",
+            "Investment Researcher",
+        ),
+    },
+]
+
+# Put Life Intelligence routes first.
+ROUTES = tuple(LIFE_INTELLIGENCE_ROUTES) + ROUTES
+
+# A match on one of these words alone is not sufficient to select an Agent.
+GENERIC_ROUTE_KEYWORDS = {
+    "source", "sources",
+    "agent", "agents",
+    "data",
+    "system", "systems",
+    "content",
+    "tool", "tools",
+    "workflow",
+    "token", "tokens",
+    "api",
+    "client", "clients",
+}
+
+
 def _route_scores(task):
     tokens = set(_fold(task))
     scores = []
+
     for route in ROUTES:
         matches = tokens & route["keywords"]
-        if matches:
-            scores.append((len(matches), route["name"], route, sorted(matches)))
-    scores.sort(key=lambda item: (-item[0], item[1]))
+
+        if not matches:
+            continue
+
+        meaningful = matches - GENERIC_ROUTE_KEYWORDS
+
+        # Do not route based only on vague words such as "source" or "token".
+        if not meaningful:
+            continue
+
+        # Meaningful matches carry more weight.
+        score = (
+            len(meaningful) * 2
+            + len(matches)
+        )
+
+        scores.append(
+            (
+                score,
+                route["name"],
+                route,
+                sorted(matches),
+            )
+        )
+
+    scores.sort(
+        key=lambda item: (
+            -item[0],
+            item[1],
+        )
+    )
+
     return scores
 
 

@@ -162,12 +162,18 @@ def ensure_schema(conn):
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(INTELLIGENCE_SCHEMA)
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute(
-        "INSERT INTO meta(key, value) VALUES ('intelligence_schema_version', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (str(INTELLIGENCE_SCHEMA_VERSION),),
-    )
-    conn.commit()
+    current = conn.execute(
+        "SELECT value FROM meta WHERE key = 'intelligence_schema_version'"
+    ).fetchone()
+    # N'ecrit que si necessaire : les lecteurs (Ask, contexte) peuvent ainsi
+    # utiliser une connexion en lecture seule.
+    if current is None or current[0] != str(INTELLIGENCE_SCHEMA_VERSION):
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('intelligence_schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(INTELLIGENCE_SCHEMA_VERSION),),
+        )
+        conn.commit()
     return conn
 
 
