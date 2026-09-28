@@ -163,6 +163,32 @@ class WorkerConsensusTests(unittest.TestCase):
         self.assertTrue(item["review_required"])
         self.assertIn("second_run_failed", item["review_reason"])
 
+    def test_dry_run_on_existing_base_does_not_alter_schema(self):
+        # Base "existante" : tables Mentor V1 presentes, tables V2 absentes.
+        conn = sqlite3.connect(self.path)
+        mentor_worker.ensure_schema(conn)
+        conn.close()
+
+        def schema():
+            c = sqlite3.connect(self.path)
+            try:
+                tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master")}
+                columns = {r[1] for r in c.execute(
+                    "PRAGMA table_info(intelligence_mentor_review_queue)")}
+                return tables, columns
+            finally:
+                c.close()
+
+        before = schema()
+        with mock.patch.object(mentor_worker.mentor_agency, "analyze",
+                               return_value=agency(relevance=0.95, confidence=0.95)):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                mentor_worker.run(source_id=self.source_id)
+        self.assertFalse(json.loads(out.getvalue())["writes_performed"])
+        self.assertEqual(schema(), before)
+        self.assertNotIn("intelligence_mentor_consensus", before[0])
+
     def test_clear_case_runs_agency_once(self):
         run1 = agency(relevance=0.95, confidence=0.95)
         with mock.patch.object(mentor_worker, "qwen_analyze",
