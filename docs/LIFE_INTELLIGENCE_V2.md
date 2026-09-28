@@ -90,6 +90,30 @@ Hors borderline : une seule analyse, comportement V1. Jamais dans le chemin d'As
 - Une source trouvée **uniquement** par le sens n'est admise que si son z-score dépasse un seuil **calibré par index** : max(2,4 ; meilleure de 20 questions hors sujet + 0,15). Elle est présentée à part (« rapprochement de sens, à vérifier »).
 - Replis lexicaux : modèle absent, `VAULT_SEMANTIC=off`, index vide, erreur ou échéance dépassée (8 s).
 
+## Verrou V2 sur le vrai Vault — `v2_guard.py`
+
+Tant que la V2 n'a pas reçu ta validation finale, **aucune écriture propre à la V2 ne touche le vrai
+`vault.db`**, même quand les tâches planifiées exécutent la branche V2 :
+
+| Composant | Vrai Vault verrouillé | Bases temporaires / copies |
+|---|---|---|
+| Claims (`vault_claims`) | écriture refusée ; `--dry-run` et lectures sans aucune écriture | V2 complète |
+| Évaluations (`vault_claim_reasoning`) | `assess` refusé ; lecture seule | V2 complète |
+| Mentor | comportement **V1** (une analyse Agency, pas de consensus, aucun schéma V2) | double Agency + consensus |
+| File de review | revue cloud refusée ; lecture à blanc possible | revue cloud possible |
+| Index sémantique | `vault_refresh` saute l'étape (`v2_not_validated`) ; indexation et calibrage refusés | index + calibrage |
+| Ask | lecture seule (utilise l'index s'il existe déjà) | hybride |
+
+Vérifié en production : le passage planifié réel de 22:50 a fait ses écritures V1 normales, et les tables V2
+sont restées strictement identiques.
+
+État du vrai Vault au moment du verrouillage : un index sémantique (64 sources) et du schéma vide
+(`intelligence_mentor_consensus`, 4 colonnes de la file de review), écrits avant le verrou par les tâches
+planifiées. Aucun claim, aucune décision V2, aucune donnée utilisateur modifiée.
+
+**Déverrouillage, seulement après validation finale :** créer le fichier `life_intelligence_v2.enabled` à la
+racine du Vault (non versionné), ou définir `VAULT_V2_WRITES=1`.
+
 ## Traitements lourds hors interactif — `life_intelligence_batch.py` / `.bat`
 
 Claims (N sources), raisonnement, index sémantique, et revue cloud seulement avec `--cloud-review`.
@@ -97,8 +121,9 @@ Chaque étape est isolée.
 
 ## Résultats (validation du 2026-09-28, i3-8130U 2 cœurs, 8 Go, CPU uniquement)
 
-**Tests automatisés :** Vault 205/205 (143 V1 + 62 V2 : claims 19, raisonnement 12, consensus 7,
-cloud 12, sémantique 12), Jarvis 181/181.
+**Tests automatisés :** Vault 220/220 (143 V1 + 77 V2 : claims 23, raisonnement 13, consensus 10,
+cloud 16, sémantique 15), Jarvis 181/181. Validation bloc par bloc, puis V2 ensemble, puis
+non-régression V1 complète.
 
 | Critère V2 | Résultat |
 |---|---|
