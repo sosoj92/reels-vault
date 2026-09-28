@@ -55,7 +55,15 @@ def analyze(
     qwen_result=None,
     heuristic_outcome=None,
     similarity=0.0,
+    variant=1,
 ):
+    """
+    variant=1 : analyse Agency V1 (inchangee).
+    variant=2 : second avis INDEPENDANT pour les cas limites (V2) : pas de
+    verdict precedent montre (pas d'ancrage), specialistes dans l'ordre
+    inverse, source en tete. Le prompt differe donc des le debut, ce qui evite
+    aussi la reutilisation du cache KV d'Ollama (cause de l'instabilite V1).
+    """
     try:
         context = agency_router.build_orchestration_context(
             text[:5000],
@@ -119,6 +127,28 @@ needs_cloud=true seulement si tu ne peux réellement pas trancher
 avec une confiance suffisante ou si une vérification externe est indispensable.
 """.strip()
 
+    if variant == 2:
+        prompt = f"""
+SOURCE À ÉVALUER :
+{text[:5000]}
+
+Second avis indépendant du Life Intelligence Mentor Engine.
+Tu n'as accès à aucune analyse précédente : juge uniquement la source.
+
+Spécialistes à mobiliser :
+{json.dumps(list(reversed(agent_briefs)), ensure_ascii=False)}
+
+Classe la source :
+- opportunity = directement exploitable pour des activités ou systèmes suivis
+- convergence = confirme une information déjà connue
+- novelty = nouvelle information utile mais non immédiatement exploitable
+- low_signal = bruit, générique, promotionnel, insuffisant ou peu utile
+
+Donne relevance (0 à 1) et confidence (0 à 1) de façon conservatrice.
+Une technologie intéressante n'est pas automatiquement une opportunité.
+needs_cloud=true seulement si une vérification externe est indispensable.
+""".strip()
+
     payload = {
         "model": MODEL,
         "stream": False,
@@ -167,6 +197,8 @@ avec une confiance suffisante ou si une vérification externe est indispensable.
             a["name"]
             for a in agents
         ]
+
+        result["variant"] = variant
 
         result["routes"] = context["routes"]
 

@@ -3,3 +3,14 @@
 fastapi
 uvicorn[standard]
 openpyxl    # optionnel : export Excel
+
+# Life Intelligence V2 - recherche semantique locale (vault_embeddings.py)
+# Modele : models/multilingual-e5-small (Xenova, ONNX quantifie, non versionne).
+# Sans ces paquets ou sans le modele, la recherche reste lexicale.
+numpy>=2
+onnxruntime>=1.20
+tokenizers>=0.20
+
+# Life Intelligence V2 - adapter cloud OPTIONNEL (vault_cloud.py).
+# Utilise seulement si ANTHROPIC_API_KEY est definie ; sinon tout reste local.
+anthropic>=1,<2

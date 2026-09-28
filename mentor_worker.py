@@ -8,8 +8,10 @@ import sqlite3
 import urllib.request
 from pathlib import Path
 import mentor_agency
+import mentor_consensus
 import mentor_decision
 import mentor_review
+import v2_guard
 from collections import Counter
 
 
@@ -369,7 +371,7 @@ def closest_source(conn, source_id, content_id, tokens):
     return best_score, best
 
 
-def classify(conn, row):
+def classify(conn, row, v2=True):
     text = text_for(row)
     tokens = tokenize(text)
     token_set = set(tokens)
@@ -528,11 +530,47 @@ def classify(conn, row):
         needs_agency=needs_agency,
     )
 
+    # V2 : cas limite -> seconde analyse Agency independante, publication
+    # seulement si les deux concordent (voir mentor_consensus pour les regles).
+    # Sur le vrai Vault non encore valide (verrou V2) : comportement V1,
+    # une seule analyse Agency.
+    borderline = (
+        mentor_consensus.borderline_reasons(qwen, agency, decision) if v2 else []
+    )
+    consensus = None
+    review_required = False
+    review_reason = None
+    if borderline:
+        agency_2 = mentor_agency.analyze(
+            text,
+            qwen_result=qwen,
+            heuristic_outcome=heuristic_outcome,
+            similarity=similarity,
+            variant=2,
+        )
+        decision = mentor_consensus.build_consensus(
+            heuristic_score=heuristic_score,
+            current_outcome=outcome,
+            qwen=qwen,
+            run1=agency,
+            run2=agency_2,
+            needs_agency=needs_agency,
+        )
+        consensus = {**decision["consensus"], "borderline_reasons": borderline}
+        review_required = decision["review_required"]
+        review_reason = decision["review_reason"]
+        analysis_model = f"{QWEN_MODEL}+agency x2"
+
     outcome = decision["outcome"]
     score = decision["relevance_score"]
     needs_cloud = decision["needs_cloud"]
+    if needs_cloud and not review_reason:
+        review_reason = "cloud_escalation_required"
 
     return {
+        "consensus": consensus,
+        "review_required": bool(review_required or needs_cloud),
+        "review_reason": review_reason,
         "outcome": outcome,
         "score": score,
         "tokens": len(tokens),
@@ -731,8 +769,17 @@ def run(limit=5, confirm=False, threshold=0.55, source_id=None):
     conn = connect()
 
     try:
-        ensure_schema(conn)
-        mentor_review.ensure_schema(conn)
+        # Une analyse a blanc ne doit pas modifier le schema d'une base
+        # existante : les migrations n'ont lieu qu'en mode --confirm (ou sur
+        # une base neuve, sans table de traitement).
+        v2 = v2_guard.v2_writes_allowed(conn)
+        fresh = not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='intelligence_mentor_processing'"
+        ).fetchone()
+        if (confirm and source_id is None) or fresh:
+            ensure_schema(conn)
+            mentor_review.ensure_schema(conn, v2=v2)
 
         if source_id is not None:
             # Re-analyse a blanc : jamais d'ecriture, pour ne pas ecraser un
@@ -750,7 +797,8 @@ def run(limit=5, confirm=False, threshold=0.55, source_id=None):
         for row in rows:
             analysis = classify(
                 conn,
-                row
+                row,
+                v2=v2,
             )
 
             create_insight = (
@@ -786,6 +834,9 @@ def run(limit=5, confirm=False, threshold=0.55, source_id=None):
                     for e in analysis["entities"]
                 ],
                 "would_create_insight": create_insight,
+                "review_required": analysis["review_required"],
+                "review_reason": analysis["review_reason"],
+                "consensus": analysis["consensus"],
             }
 
             output.append(item)
@@ -793,12 +844,16 @@ def run(limit=5, confirm=False, threshold=0.55, source_id=None):
             if not confirm:
                 continue
 
-            if analysis["needs_cloud"]:
+            if analysis["review_required"]:
                 mentor_review.enqueue(
                     conn,
                     row,
                     analysis,
+                    reason=analysis.get("review_reason") or "cloud_escalation_required",
                 )
+
+            if analysis.get("consensus"):
+                mentor_review.record_consensus(conn, row, analysis)
 
             now = utcnow()
             qwen = analysis["qwen"] or {}

@@ -35,3 +35,9 @@ external/
 backups/
 *.db
 recovered_tiktok_links_*.txt
+
+# Modeles locaux telecharges (embeddings)
+models/
+
+# Verrou V2 : present uniquement apres validation finale de l utilisateur
+life_intelligence_v2.enabled
