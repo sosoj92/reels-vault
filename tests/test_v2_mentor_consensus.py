@@ -199,5 +199,83 @@ class WorkerConsensusTests(unittest.TestCase):
         self.assertTrue(item["publishable"])
 
 
+class LockedRealVaultMentorTests(unittest.TestCase):
+    """Verrou V2 : sur le vrai Vault non valide, le Mentor reste en V1."""
+
+    def setUp(self):
+        import v2_guard
+
+        self.v2_guard = v2_guard
+        self.path = _isolation.TMP / f"real_mentor_{self._testMethodName}.db"
+        conn = make_db(str(self.path))
+        self.source_id = add_source(conn, "https://example.test/borderline",
+                                    "Outil de prospection LinkedIn", transcript=TEXT)
+        mentor_worker.ensure_schema(conn)
+        mentor_review.ensure_schema(conn, v2=False)  # schema V1 d'une vraie base
+        conn.close()
+        self.calls = []
+        self.patches = [
+            mock.patch.object(v2_guard, "REAL_DB", self.path),
+            mock.patch.object(v2_guard, "FLAG", _isolation.TMP / "flag_mentor_absent"),
+            mock.patch.dict("os.environ", {"VAULT_V2_WRITES": ""}),
+            mock.patch.object(mentor_worker, "DB", str(self.path)),
+            mock.patch.object(mentor_worker, "ollama_available", return_value=True),
+            mock.patch.object(mentor_worker, "qwen_analyze", return_value=dict(QWEN)),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+
+    def schema(self):
+        conn = sqlite3.connect(self.path)
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+            columns = {r[1] for r in conn.execute(
+                "PRAGMA table_info(intelligence_mentor_review_queue)")}
+            return tables, columns
+        finally:
+            conn.close()
+
+    def test_confirm_run_keeps_v1_behaviour_and_schema(self):
+        before = self.schema()
+
+        def fake_analyze(text, **kwargs):
+            self.calls.append(kwargs.get("variant", 1))
+            return agency()
+
+        with mock.patch.object(mentor_worker.mentor_agency, "analyze", side_effect=fake_analyze):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                mentor_worker.run(limit=5, confirm=True)
+        item = json.loads(out.getvalue())["items"][0]
+        # Cas borderline (Qwen et Agency divergent) mais verrou ferme : V1.
+        self.assertEqual(self.calls, [1])
+        self.assertIsNone(item["consensus"])
+        self.assertEqual(self.schema(), before)
+        self.assertNotIn("intelligence_mentor_consensus", before[0])
+        conn = sqlite3.connect(self.path)
+        try:
+            # Ecritures V1 normales du pipeline.
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM intelligence_mentor_processing").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_cloud_review_is_blocked_but_dry_run_reads(self):
+        conn = sqlite3.connect(self.path)
+        try:
+            before = self.schema()
+            result = mentor_review.process_queue(conn, provider=None, dry_run=True)
+            self.assertEqual(result["status"], "no_cloud_provider")
+            self.assertEqual(self.schema(), before)
+            with self.assertRaises(self.v2_guard.V2WritesBlocked):
+                mentor_review.process_queue(conn, provider=object(), dry_run=False)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

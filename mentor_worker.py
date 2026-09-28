@@ -11,6 +11,7 @@ import mentor_agency
 import mentor_consensus
 import mentor_decision
 import mentor_review
+import v2_guard
 from collections import Counter
 
 
@@ -370,7 +371,7 @@ def closest_source(conn, source_id, content_id, tokens):
     return best_score, best
 
 
-def classify(conn, row):
+def classify(conn, row, v2=True):
     text = text_for(row)
     tokens = tokenize(text)
     token_set = set(tokens)
@@ -531,7 +532,11 @@ def classify(conn, row):
 
     # V2 : cas limite -> seconde analyse Agency independante, publication
     # seulement si les deux concordent (voir mentor_consensus pour les regles).
-    borderline = mentor_consensus.borderline_reasons(qwen, agency, decision)
+    # Sur le vrai Vault non encore valide (verrou V2) : comportement V1,
+    # une seule analyse Agency.
+    borderline = (
+        mentor_consensus.borderline_reasons(qwen, agency, decision) if v2 else []
+    )
     consensus = None
     review_required = False
     review_reason = None
@@ -767,13 +772,14 @@ def run(limit=5, confirm=False, threshold=0.55, source_id=None):
         # Une analyse a blanc ne doit pas modifier le schema d'une base
         # existante : les migrations n'ont lieu qu'en mode --confirm (ou sur
         # une base neuve, sans table de traitement).
+        v2 = v2_guard.v2_writes_allowed(conn)
         fresh = not conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='intelligence_mentor_processing'"
         ).fetchone()
         if (confirm and source_id is None) or fresh:
             ensure_schema(conn)
-            mentor_review.ensure_schema(conn)
+            mentor_review.ensure_schema(conn, v2=v2)
 
         if source_id is not None:
             # Re-analyse a blanc : jamais d'ecriture, pour ne pas ecraser un
@@ -791,7 +797,8 @@ def run(limit=5, confirm=False, threshold=0.55, source_id=None):
         for row in rows:
             analysis = classify(
                 conn,
-                row
+                row,
+                v2=v2,
             )
 
             create_insight = (

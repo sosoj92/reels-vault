@@ -16,6 +16,8 @@ mentor_review.py - File de review du Mentor (V1) + consensus et revue cloud (V2)
 import json
 from datetime import datetime, timezone
 
+import v2_guard
+
 CLOUD_MIN_RELEVANCE = 0.60
 CLOUD_MIN_CONFIDENCE = 0.70
 ALLOWED_CLASSIFICATIONS = ("opportunity", "convergence", "novelty", "low_signal")
@@ -26,7 +28,8 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def ensure_schema(conn):
+def ensure_schema(conn, v2=True):
+    """Table V1 toujours ; colonnes et table V2 seulement si v2 (verrou)."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS intelligence_mentor_review_queue (
             source_id INTEGER PRIMARY KEY,
@@ -41,6 +44,9 @@ def ensure_schema(conn):
             updated_at TEXT NOT NULL
         )
     """)
+    if not v2:
+        conn.commit()
+        return
     columns = {
         row[1] for row in conn.execute("PRAGMA table_info(intelligence_mentor_review_queue)")
     }
@@ -116,6 +122,7 @@ def enqueue(conn, row, analysis, reason="cloud_escalation_required"):
 
 
 def record_consensus(conn, row, analysis):
+    v2_guard.require_v2_writes(conn, "trace de consensus du Mentor")
     consensus = analysis.get("consensus") or {}
     timestamp = now()
     conn.execute(
@@ -224,7 +231,9 @@ def process_queue(conn, provider=None, *, limit=5, dry_run=False):
     """
     import vault_cloud
 
-    ensure_schema(conn)
+    if not dry_run:
+        v2_guard.require_v2_writes(conn, "revue cloud de la file de review")
+    ensure_schema(conn, v2=v2_guard.v2_writes_allowed(conn))
     provider = provider if provider is not None else vault_cloud.get_provider()
     items = conn.execute(
         """
