@@ -36,6 +36,7 @@ import time
 import urllib.error
 import urllib.request
 
+import v2_guard
 import vault_analysis as analysis
 import vault_intelligence as intelligence
 
@@ -129,10 +130,71 @@ class ClaimExtractionError(RuntimeError):
 
 
 def ensure_schema(conn):
+    v2_guard.require_v2_writes(conn, "schema des claims structures")
     intelligence.ensure_schema(conn)
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
+
+
+def _rows(conn, sql, params=()):
+    cursor = conn.execute(sql, params)
+    columns = [item[0] for item in cursor.description]
+    return [dict(zip(columns, tuple(row))) for row in cursor.fetchall()]
+
+
+def _payload_readonly(conn, source_id, max_chars=None):
+    """
+    Meme contenu que vault_analysis.source_payload, SANS aucune ecriture
+    (source_payload migre le schema et ecrit dans meta). Utilise pour les
+    analyses a blanc sur le vrai Vault verrouille.
+    """
+    source = next(iter(_rows(conn, "SELECT * FROM intelligence_sources WHERE id = ?",
+                             (source_id,))), None)
+    if not source:
+        raise analysis.AnalysisError(f"source {source_id} not found")
+    if source.get("content_id") is None:
+        raise analysis.AnalysisError(f"source {source_id} has no V2 content_id")
+    content = next(iter(_rows(conn, "SELECT * FROM contents WHERE id = ?",
+                              (source["content_id"],))), None)
+    if not content:
+        raise analysis.AnalysisError(f"V2 content {source['content_id']} not found")
+    entities = _rows(
+        conn,
+        """
+        SELECT DISTINCT e.id, e.name, e.entity_type, e.canonical_key
+          FROM intelligence_entities e
+          JOIN intelligence_entity_sources es ON es.entity_id = e.id
+         WHERE es.source_id = ? AND es.role <> 'primary'
+         ORDER BY e.id
+        """,
+        (source_id,),
+    )
+    title = analysis._clean_text(content.get("title")) or analysis._clean_text(source.get("title"))
+    description = analysis._effective_description(content)
+    transcript = analysis._clean_text(content.get("transcript")) or ""
+    if max_chars is None:
+        max_chars = int(os.environ.get("VAULT_ANALYSIS_MAX_CHARS", "30000"))
+    transcript = transcript[:max(0, max_chars - len(title or "") - len(description or ""))]
+    if not (title or description or transcript):
+        raise analysis.AnalysisError(f"source {source_id} has no analyzable text")
+    return {
+        "source_id": source_id,
+        "content_id": source["content_id"],
+        "source_url": source.get("source_url"),
+        "platform": source.get("platform"),
+        "category": content.get("category"),
+        "title": title,
+        "description": description,
+        "transcript": transcript,
+        "entities": entities,
+    }
+
+
+def _payload(conn, source_id, max_chars=None):
+    if v2_guard.v2_writes_allowed(conn):
+        return analysis.source_payload(conn, source_id, max_chars=max_chars)
+    return _payload_readonly(conn, source_id, max_chars=max_chars)
 
 
 # ---------------------------------------------------------------------------
@@ -880,11 +942,11 @@ def extract_source(conn, source_id, extractor, *, dry_run=False, force=False):
     """
     Extrait, valide et ecrit les claims d'une source.
     dry_run=True : aucune ecriture, retourne ce qui serait ecrit.
+    Sur le vrai Vault verrouille (V2 non validee) : seul dry_run est permis.
     """
-    ensure_schema(conn)
-    payload = analysis.source_payload(
-        conn, source_id, max_chars=getattr(extractor, "max_chars", None),
-    )
+    if not dry_run or v2_guard.v2_writes_allowed(conn):
+        ensure_schema(conn)  # leve V2WritesBlocked sur le vrai Vault verrouille
+    payload = _payload(conn, source_id, max_chars=getattr(extractor, "max_chars", None))
     fingerprint = _fingerprint(payload, extractor)
     if not force and not dry_run:
         done = conn.execute(
@@ -1042,8 +1104,17 @@ def extract_source(conn, source_id, extractor, *, dry_run=False, force=False):
     return result
 
 
+def _has_table(conn, name):
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
 def pending_source_ids(conn, extractor, limit):
-    ensure_schema(conn)
+    """Sources a extraire (lecture seule sur le vrai Vault verrouille)."""
+    if v2_guard.v2_writes_allowed(conn):
+        ensure_schema(conn)
+    has_extractions = _has_table(conn, "intelligence_claim_extractions")
     rows = conn.execute(
         """
         SELECT s.id FROM intelligence_sources s
@@ -1054,13 +1125,11 @@ def pending_source_ids(conn, extractor, limit):
     selected = []
     for (source_id,) in rows:
         try:
-            payload = analysis.source_payload(
-                conn, source_id, max_chars=getattr(extractor, "max_chars", None),
-            )
+            payload = _payload(conn, source_id, max_chars=getattr(extractor, "max_chars", None))
         except analysis.AnalysisError:
             continue
         fingerprint = _fingerprint(payload, extractor)
-        done = conn.execute(
+        done = has_extractions and conn.execute(
             """
             SELECT 1 FROM intelligence_claim_extractions
              WHERE source_id = ? AND fingerprint = ? AND version = ?
@@ -1076,8 +1145,11 @@ def pending_source_ids(conn, extractor, limit):
 
 
 def claims_for_source(conn, source_id):
-    ensure_schema(conn)
-    rows = conn.execute(
+    """Lecture seule : ne cree jamais de table."""
+    if not _has_table(conn, "intelligence_claim_structure"):
+        return []
+    return _rows(
+        conn,
         """
         SELECT c.id, c.claim_text, c.verification_status, s.*
           FROM intelligence_claim_structure s
@@ -1086,8 +1158,7 @@ def claims_for_source(conn, source_id):
          ORDER BY c.id
         """,
         (source_id,),
-    ).fetchall()
-    return [dict(row) for row in rows]
+    )
 
 
 def main():
@@ -1117,6 +1188,8 @@ def main():
                 print(f"[{index}/{len(ids)}] source {source_id}...", file=sys.stderr, flush=True)
                 result.append(extract_source(conn, source_id, extractor,
                                              dry_run=args.dry_run, force=args.force))
+    except v2_guard.V2WritesBlocked as exc:
+        result = {"status": "blocked", "reason": str(exc)}
     finally:
         conn.close()
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))

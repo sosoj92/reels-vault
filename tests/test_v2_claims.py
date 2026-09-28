@@ -252,6 +252,97 @@ class RealDataRegressionTests(unittest.TestCase):
             claims.parse_claims_json('{"claims": [{"claim_text": "cou')
 
 
+class LockedRealVaultTests(unittest.TestCase):
+    """
+    Verrou V2 : sur le vrai Vault (simule par une base temporaire designee
+    comme "vraie"), aucune ecriture V2 tant que la V2 n'est pas validee.
+    """
+
+    def setUp(self):
+        import hashlib
+        from unittest import mock
+
+        import v2_guard
+
+        self.hashlib = hashlib
+        self.v2_guard = v2_guard
+        self.path = _isolation.TMP / f"real_{self._testMethodName}.db"
+        conn = make_db(str(self.path))
+        self.source = add_source(conn, "https://example.test/rtk", "RTK",
+                                 transcript="RTK réduit la consommation de tokens de 90 %.")
+        conn.close()
+        self.patches = [
+            mock.patch.object(v2_guard, "REAL_DB", self.path),
+            mock.patch.object(v2_guard, "FLAG", _isolation.TMP / f"flag_{self._testMethodName}"),
+            mock.patch.dict("os.environ", {"VAULT_V2_WRITES": ""}),
+        ]
+        for patch in self.patches:
+            patch.start()
+        self.items = [claim("RTK réduit la consommation de tokens de 90 %", "RTK", "réduit",
+                            "la consommation de tokens de 90 %",
+                            "RTK réduit la consommation de tokens de 90 %")]
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+
+    def digest(self):
+        return self.hashlib.sha256(self.path.read_bytes()).hexdigest()
+
+    def connect(self):
+        import sqlite3
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def test_write_is_blocked_and_file_is_untouched(self):
+        before = self.digest()
+        conn = self.connect()
+        try:
+            with self.assertRaises(self.v2_guard.V2WritesBlocked):
+                claims.extract_source(conn, self.source,
+                                     claims.StaticClaimExtractor({self.source: self.items}))
+        finally:
+            conn.close()
+        self.assertEqual(self.digest(), before)
+
+    def test_dry_run_and_reads_work_without_any_write(self):
+        before = self.digest()
+        conn = self.connect()
+        try:
+            result = claims.extract_source(
+                conn, self.source, claims.StaticClaimExtractor({self.source: self.items}),
+                dry_run=True)
+            pending = claims.pending_source_ids(
+                conn, claims.StaticClaimExtractor({}), 5)
+            stored = claims.claims_for_source(conn, self.source)
+        finally:
+            conn.close()
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(len(result["claims"]), 1)
+        self.assertEqual(pending, [self.source])
+        self.assertEqual(stored, [])
+        self.assertEqual(self.digest(), before)
+
+    def test_unlocked_after_validation_flag(self):
+        self.v2_guard.FLAG.write_text("valide", encoding="utf-8")
+        conn = self.connect()
+        try:
+            result = claims.extract_source(
+                conn, self.source, claims.StaticClaimExtractor({self.source: self.items}))
+        finally:
+            conn.close()
+        self.assertEqual(len(result["claim_ids"]), 1)
+
+    def test_other_databases_are_never_locked(self):
+        import sqlite3
+        memory = sqlite3.connect(":memory:")
+        self.assertTrue(self.v2_guard.v2_writes_allowed(memory))
+        memory.close()
+        self.assertTrue(self.v2_guard.v2_writes_allowed(str(_isolation.TMP / "copie.db")))
+        self.assertFalse(self.v2_guard.v2_writes_allowed(str(self.path)))
+
+
 class ValidatorUnitTests(unittest.TestCase):
     def test_kind_detection(self):
         self.assertEqual(claims.detect_kinds("il faut absolument que tu l'installes")[0], "advice")
