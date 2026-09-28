@@ -82,11 +82,14 @@ def extraire_liens(chemin):
     son format (txt, csv, json d'export). Les doublons sont supprimés."""
     texte = Path(chemin).read_text(encoding="utf-8", errors="ignore")
     liens, vus = [], set()
-    for lien in MOTIF_LIEN.findall(texte):
-        lien = lien.rstrip(".,;")
-        if lien not in vus:
-            vus.add(lien)
-            liens.append(lien)
+    for bloc in MOTIF_LIEN.findall(texte):
+        # Plusieurs liens partagés peuvent être collés sans séparateur :
+        # https://vm.tiktok.com/AAA/https://vm.tiktok.com/BBB/
+        for lien in re.split(r"(?=https?://)", bloc):
+            lien = lien.rstrip(".,;")
+            if MOTIF_LIEN.fullmatch(lien) and lien not in vus:
+                vus.add(lien)
+                liens.append(lien)
     return liens
 
 

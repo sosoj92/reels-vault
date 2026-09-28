@@ -3,7 +3,7 @@
 __pycache__/
 *.pyc
 
-# Données personnelles du Vault
+# DonnÃ©es personnelles du Vault
 raw/
 images/
 .temp/
@@ -17,3 +17,21 @@ test-liens.txt
 # Secrets / variables
 .env
 *.env
+# Base de donnees et exports du Vault (donnees personnelles)
+vault.db
+vault.db-journal
+exports/
+
+# Inbox mobile - données personnelles
+mobile-inbox/
+
+# Logs locaux du worker d'analyse
+logs/
+
+# Checkouts upstream locaux (Agency Agents, Reels Vault original)
+external/
+
+# Sauvegardes locales avant modification
+backups/
+*.db
+recovered_tiktok_links_*.txt

@@ -11,6 +11,7 @@ que les lire. Relancable apres chaque mise a jour de index.md.
 
 Usage :
     python generate_vault.py
+    python generate_vault.py --from-db     (option : lire vault.db, corrections manuelles incluses)
 """
 
 import argparse
@@ -108,6 +109,26 @@ def fusionner(categories, entrees):
     return [{"nom": c, "sous_themes": s} for c, s in arbre.items()]
 
 
+def lire_db(chemin):
+    """Memes donnees, lues dans vault.db : les corrections manuelles y sont prises en compte."""
+    import vault_db
+
+    conn = vault_db.connect(chemin)
+    entrees = []
+    for c in vault_db.dump(conn)["contents"]:
+        entrees.append({
+            "titre": c["title"] or "", "lien": c["source_url"], "plateforme": c["platform"] or "",
+            "auteur": c["author"] or "", "categorie": c["category"] or "",
+            "sous_themes": c["subthemes"], "tags": c["tags"], "contenu": c["description"] or "",
+            "outils": ", ".join(r["name"] + (f" ({r['description']})" if r["description"] else "")
+                                for r in c["resources"]),
+        })
+    categories = {cat["name"]: [s["name"] for s in cat["subthemes"]]
+                  for cat in vault_db.get_taxonomy(conn)["categories"] if cat["name"]}
+    conn.close()
+    return entrees, categories
+
+
 def json_html(donnees):
     """JSON sur a integrer dans une balise <script>."""
     return json.dumps(donnees, ensure_ascii=False).replace("</", "<\\/")
@@ -118,10 +139,15 @@ def main():
     parser.add_argument("--index", default=RACINE / "index.md", type=Path)
     parser.add_argument("--taxonomy", default=RACINE / "taxonomy.md", type=Path)
     parser.add_argument("--out", default=RACINE / "vault.html", type=Path)
+    parser.add_argument("--from-db", nargs="?", const=RACINE / "vault.db", type=Path,
+                        help="lire vault.db au lieu de index.md (optionnel)")
     args = parser.parse_args()
 
-    entrees = lire_index(args.index)
     categories, tags_frequents = lire_taxonomie(args.taxonomy)
+    if args.from_db:
+        entrees, categories = lire_db(args.from_db)
+    else:
+        entrees = lire_index(args.index)
     donnees = {
         "entrees": entrees,
         "categories": fusionner(categories, entrees),
