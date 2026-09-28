@@ -1,6 +1,7 @@
 import _isolation  # noqa: F401  (EN PREMIER : isole le vrai Vault)
 
 import json
+import time
 import os
 import unittest
 from types import SimpleNamespace
@@ -119,6 +120,39 @@ class LocalSynthesisDeadlineTests(unittest.TestCase):
         self.assertEqual(info["status"], "ok")
         self.assertIsNotNone(seen.get("timeout"))
         self.assertLessEqual(seen["timeout"], 3.0)
+
+
+class ColdModelTests(unittest.TestCase):
+    """Modele qwen installe mais non charge : pas d'attente, prechauffage."""
+
+    def test_cold_model_answers_immediately_and_warms_up(self):
+        warmups = []
+        sources = [{"title": "RTK", "snippet": "RTK réduit les tokens.", "url": "u"}]
+        with mock.patch.object(vault_ask, "_ollama_available", return_value=False), \
+                mock.patch.object(vault_ask, "_ollama_installed", return_value=True), \
+                mock.patch.object(vault_ask, "_warm_up_async",
+                                  side_effect=lambda: warmups.append(1) or True), \
+                mock.patch.object(vault_ask, "_ollama_chat",
+                                  side_effect=AssertionError("ne doit pas attendre qwen")):
+            started = time.perf_counter()
+            text, info = vault_ask.synthesize_local("RTK ?", sources, [], 25.0)
+        self.assertLess(time.perf_counter() - started, 1.0)
+        self.assertIsNone(text)
+        self.assertEqual(info["status"], "skipped_model_cold")
+        self.assertTrue(info["warming_up"])
+        self.assertEqual(warmups, [1])
+
+    def test_ollama_down_is_unavailable_without_warmup(self):
+        with mock.patch.object(vault_ask, "_ollama_available", return_value=False), \
+                mock.patch.object(vault_ask, "_ollama_installed", return_value=False), \
+                mock.patch.object(vault_ask, "_warm_up_async",
+                                  side_effect=AssertionError("pas de prechauffage")):
+            text, info = vault_ask.synthesize_local("RTK ?", [], [], 25.0)
+        self.assertEqual(info["status"], "unavailable")
+
+    def test_warmup_can_be_disabled(self):
+        with mock.patch.dict(os.environ, {"VAULT_ASK_WARMUP": "0"}):
+            self.assertFalse(vault_ask._warm_up_async())
 
 
 class CloudAdapterMockTests(unittest.TestCase):

@@ -320,14 +320,59 @@ def render_answer(question, sources, *, mentor=None, sensitive=False,
 # Enrichissement LLM optionnel (jamais bloquant)
 # ---------------------------------------------------------------------------
 
-def _ollama_available(timeout=1.5):
+def _ollama_models(endpoint, timeout=1.5):
     try:
-        with urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=timeout) as resp:
+        with urllib.request.urlopen(f"{OLLAMA_BASE}{endpoint}", timeout=timeout) as resp:
             models = json.load(resp).get("models", [])
     except Exception:
+        return None
+    return {m.get("name") for m in models} | {m.get("model") for m in models}
+
+
+def _ollama_available(timeout=1.5):
+    """Modele PRET : Ollama repond et qwen est deja charge en memoire."""
+    loaded = _ollama_models("/api/ps", timeout)
+    return bool(loaded) and LOCAL_MODEL in loaded
+
+
+def _ollama_installed(timeout=1.5):
+    installed = _ollama_models("/api/tags", timeout)
+    return bool(installed) and LOCAL_MODEL in installed
+
+
+def _warm_up_async():
+    """
+    Precharge qwen dans un processus detache (meme num_ctx que tous les
+    appelants, donc pas de rechargement ensuite). Ask n'attend jamais ce
+    chargement : c'est la question SUIVANTE qui en profite.
+    """
+    if os.environ.get("VAULT_ASK_WARMUP", "1").strip().lower() in ("0", "off", "false", "non"):
         return False
-    names = {m.get("name") for m in models} | {m.get("model") for m in models}
-    return LOCAL_MODEL in names
+    import subprocess
+    import sys
+
+    payload = json.dumps({
+        "model": LOCAL_MODEL,
+        "keep_alive": "30m",
+        "options": {"num_ctx": LOCAL_NUM_CTX},
+    })
+    code = (
+        "import urllib.request as u\n"
+        f"u.urlopen(u.Request({OLLAMA_BASE + '/api/generate'!r}, data={payload!r}.encode(),"
+        " headers={'Content-Type': 'application/json'}), timeout=180).read()\n"
+    )
+    flags = 0
+    if os.name == "nt":
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags,
+        )
+    except OSError:
+        return False
+    return True
 
 
 def _run_with_deadline(func, timeout):
@@ -411,6 +456,12 @@ def _complete_sentences(text):
 
 def synthesize_local(question, sources, agents, timeout):
     if not _ollama_available():
+        if _ollama_installed():
+            # Modele froid : chargement + generation depasseraient l'echeance
+            # (mesure : 31 s pour aucune synthese). On repond sans attendre et
+            # on prechauffe pour la prochaine question.
+            return None, {"status": "skipped_model_cold", "model": LOCAL_MODEL,
+                          "warming_up": _warm_up_async()}
         return None, {"status": "unavailable", "model": LOCAL_MODEL}
     system, user = _synthesis_prompt(question, sources, agents)
     started = time.perf_counter()

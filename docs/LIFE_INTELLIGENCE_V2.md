@@ -132,6 +132,7 @@ cloud 12, sémantique 12), Jarvis 181/181.
 | Bridge `--ask` de bout en bout, sans LLM | 3,5 s |
 | Bridge `--ask`, avec synthèse Qwen | 25,7 s |
 | Outil Jarvis : TDAH / aucune source / Ollama coupé | 2,3 s / 2,1 s / 4,3 s |
+| Outil Jarvis, qwen non chargé (après inactivité) | 5,6 s sans synthèse, préchauffage en arrière-plan (~3 s) ; question suivante avec synthèse. Avant : 31 s pour aucune synthèse |
 | Mentor, cas borderline (2 analyses Agency) | ~90 s par source (batch) |
 | Claims qwen3:1.7b | 107–194 s par source (batch) — ~2 h pour 64 sources |
 
