@@ -27,8 +27,12 @@ ROOT = Path(__file__).resolve().parent
 
 def _step(report, name, func):
     started = time.perf_counter()
+    import v2_guard
+
     try:
         report[name] = {"status": "ok", **(func() or {})}
+    except v2_guard.V2WritesBlocked as exc:
+        report[name] = {"status": "blocked", "reason": str(exc)}
     except Exception as exc:  # noqa: BLE001 - chaque etape est facultative
         report[name] = {"status": "error", "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     report[name]["elapsed_s"] = round(time.perf_counter() - started, 1)

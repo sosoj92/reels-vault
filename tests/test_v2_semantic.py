@@ -248,5 +248,84 @@ class FallbackTests(unittest.TestCase):
         self.assertIn("RTK", result["answer"])
 
 
+class LockedRealVaultSemanticTests(unittest.TestCase):
+    """
+    Verrou V2 : sur le vrai Vault non valide, ni index ni calibrage ne sont
+    ecrits (vault_refresh saute l'etape) ; la recherche reste en lecture.
+    """
+
+    def setUp(self):
+        import hashlib
+        import sqlite3
+
+        import v2_guard
+
+        self.v2_guard = v2_guard
+        self.path = _isolation.TMP / f"real_semantic_{self._testMethodName}.db"
+        conn, self.ids = build_corpus()
+        disk = sqlite3.connect(self.path)
+        conn.backup(disk)
+        disk.close()
+        conn.close()
+        self.digest = lambda: hashlib.sha256(self.path.read_bytes()).hexdigest()
+        self.patches = [
+            mock.patch.object(v2_guard, "REAL_DB", self.path),
+            mock.patch.object(v2_guard, "FLAG", _isolation.TMP / "flag_semantic_absent"),
+            mock.patch.dict(os.environ, {"VAULT_V2_WRITES": ""}),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+
+    def test_indexing_is_blocked_and_search_still_answers(self):
+        import sqlite3
+
+        before = self.digest()
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        try:
+            with self.assertRaises(self.v2_guard.V2WritesBlocked):
+                embeddings.index_sources(conn, FakeBackend())
+            with self.assertRaises(self.v2_guard.V2WritesBlocked):
+                embeddings.calibrate(conn, FakeBackend())
+            results, info = context.search_sources_hybrid(
+                conn, "économiser des tokens avec RTK", backend=FakeBackend())
+        finally:
+            conn.close()
+        self.assertEqual(results[0]["source_id"], self.ids["rtk"])
+        self.assertEqual(info["mode"], "lexical_fallback")
+        self.assertEqual(self.digest(), before)
+
+    def test_vault_refresh_skips_semantic_index(self):
+        import vault_refresh
+
+        with mock.patch.object(vault_refresh, "_run_migration"), \
+                mock.patch.object(vault_refresh, "NotionCockpitClient"):
+            result = vault_refresh.refresh(_isolation.TMP, self.path, sync_notion=False)
+        self.assertEqual(result["semantic_index"],
+                         {"status": "skipped", "reason": "v2_not_validated"})
+        import sqlite3
+        conn = sqlite3.connect(self.path)
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+        finally:
+            conn.close()
+        self.assertNotIn("intelligence_embeddings", tables)
+
+    def test_batch_reports_blocked_steps(self):
+        import life_intelligence_batch
+
+        report = life_intelligence_batch.run(str(self.path), claims_limit=1,
+                                             extractor_name="ollama")
+        self.assertEqual(report["claims"]["status"], "blocked")
+        self.assertEqual(report["reasoning"]["status"], "blocked")
+        self.assertIn(report["semantic_index"]["status"], ("blocked", "ok"))
+        if report["semantic_index"]["status"] == "ok":
+            self.assertIn("skipped", report["semantic_index"])
+
+
 if __name__ == "__main__":
     unittest.main()

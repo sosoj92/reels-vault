@@ -116,7 +116,12 @@ def refresh(vault_path, db_path, *, sync_notion=True, index_semantic=True):
         # centaines de ms par nouvelle source). Jamais bloquant : une erreur
         # laisse simplement la recherche en mode lexical.
         semantic_index = {"status": "skipped", "reason": "disabled"}
-        if index_semantic:
+        import v2_guard
+
+        if index_semantic and not v2_guard.v2_writes_allowed(conn):
+            # Verrou V2 : pas d'ecriture V2 sur le vrai Vault avant validation.
+            semantic_index = {"status": "skipped", "reason": "v2_not_validated"}
+        elif index_semantic:
             try:
                 import vault_embeddings
 

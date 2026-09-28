@@ -26,6 +26,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+import v2_guard
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = Path(
     os.environ.get("VAULT_EMBEDDING_MODEL_DIR") or ROOT / "models" / "multilingual-e5-small"
@@ -175,6 +177,7 @@ def default_backend():
 
 
 def ensure_schema(conn):
+    v2_guard.require_v2_writes(conn, "index semantique")
     conn.executescript(SCHEMA)
     return conn
 
@@ -315,6 +318,7 @@ def index_sources(conn, backend=None, *, rebuild=False, source_ids=None):
 
 def calibrate(conn, backend):
     """Seuil du semantique pur = max(plancher, pire sonde hors sujet + marge)."""
+    v2_guard.require_v2_writes(conn, "calibrage semantique")
     rows = load_index(conn, backend.model)
     if not rows:
         return None
@@ -429,6 +433,8 @@ def main():
             result = index_sources(conn, rebuild=args.rebuild)
     except EmbeddingUnavailable as exc:
         result = {"status": "unavailable", "reason": str(exc)}
+    except v2_guard.V2WritesBlocked as exc:
+        result = {"status": "blocked", "reason": str(exc)}
     finally:
         conn.close()
     print(json.dumps(result, ensure_ascii=False, indent=2))
