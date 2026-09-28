@@ -91,6 +91,36 @@ class CloudAbsentTests(unittest.TestCase):
         self.assertEqual(tuple(status), ("review_required", None))
 
 
+class LocalSynthesisDeadlineTests(unittest.TestCase):
+    """La connexion Ollama doit se fermer a l'echeance (sinon Ollama continue
+    de generer et sature le CPU : requete suivante 44,6 s au lieu de 2,7 s)."""
+
+    def test_socket_timeout_matches_the_deadline(self):
+        seen = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({"message": {"content": "Synthèse [1]."}}).encode()
+
+        def fake_urlopen(request, timeout=None):
+            seen["timeout"] = timeout
+            return Response()
+
+        sources = [{"title": "RTK", "snippet": "RTK réduit les tokens.", "url": "u"}]
+        with mock.patch.object(vault_ask, "_ollama_available", return_value=True), \
+                mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text, info = vault_ask.synthesize_local("RTK ?", sources, [], 3.0)
+        self.assertEqual(info["status"], "ok")
+        self.assertIsNotNone(seen.get("timeout"))
+        self.assertLessEqual(seen["timeout"], 3.0)
+
+
 class CloudAdapterMockTests(unittest.TestCase):
     """V2-9 : adapter mocke, review traitee sans exposer de secret."""
 
