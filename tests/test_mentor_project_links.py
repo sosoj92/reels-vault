@@ -12,6 +12,8 @@ from unittest import mock
 
 import mentor_proactive as proactive
 import mentor_project_links as links
+import mentor_project_profiles as profiles
+import setup_project_profiles
 import vault_intelligence as intelligence
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
@@ -59,6 +61,7 @@ class Vault:
                 (entity_id, self.ids.get(parent), name, STAMP),
             )
         self.conn.commit()
+        setup_project_profiles.seed(self.conn)
         self.count = 0
 
     def project(self, suffix):
@@ -109,8 +112,14 @@ class ClassificationTests(unittest.TestCase):
 
     def test_generic_tool_gives_no_project(self):
         sid = self.vault.source("ChatGPT : 10 prompts pour gagner du temps",
-                                "Automatisation avec ChatGPT et Claude, workflow IA.")
+                                "Des astuces ChatGPT, Claude et IA au quotidien.")
         self.assertEqual(self.vault.candidates(sid), {})
+
+    def test_generic_automation_is_never_reviewable(self):
+        sid = self.vault.source("ChatGPT : 10 prompts pour gagner du temps",
+                                "Automatisation avec ChatGPT et Claude, workflow IA.")
+        levels = {c["level"] for c in self.vault.candidates(sid).values()}
+        self.assertFalse(levels & {"high", "medium"})
 
     def test_automation_and_prospecting_are_not_enough(self):
         sid = self.vault.source("Automatiser la prospection LinkedIn",
@@ -141,12 +150,11 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(cand["level"], "medium")
         kinds = [s["kind"] for s in cand["signals"]]
         self.assertGreaterEqual(kinds.count("core"), 2)
-        self.assertIn("context", kinds)
 
     def test_named_client_wins_over_its_vertical(self):
         sid = self.vault.source(
             "Halidi : optimiser l'import/export",
-            "Halidi Transport veut automatiser sa logistique et le suivi transport.",
+            "Halidi Transport veut automatiser sa logistique et ses devis.",
         )
         found = self.vault.candidates(sid)
         self.assertEqual(found["Halidi Transport International"]["level"], "high")
@@ -155,7 +163,7 @@ class ClassificationTests(unittest.TestCase):
 
     def test_logistics_theme_without_client_name_never_targets_client(self):
         sid = self.vault.source("Logistique : reduire le cout du transport",
-                                "logistique, transporteurs, douane et livraison")
+                                "logistique, douane, fret et devis clients")
         found = self.vault.candidates(sid)
         self.assertEqual(found["Verticale Logistique"]["level"], "medium")
         self.assertNotIn("Halidi Transport International", found)
@@ -172,7 +180,7 @@ class ClassificationTests(unittest.TestCase):
     def test_two_projects_equally_plausible_are_ambiguous(self):
         sid = self.vault.source(
             "CV et entretien : recrutement de candidats",
-            "offre d'emploi en full remote, recrutement de candidats, CV, entretien",
+            "candidature via job board en full remote, recrutement de candidats, CV, entretien",
         )
         found = self.vault.candidates(sid)
         self.assertEqual(found["Nexdoor Talent"]["level"], "ambiguous")
@@ -298,7 +306,7 @@ class StorageAndReviewTests(unittest.TestCase):
     def test_review_cli_approve_reject_skip(self):
         conn = self.vault.conn
         other = self.vault.source("Logistique : reduire le cout du transport",
-                                  "logistique, transporteurs, douane et livraison")
+                                  "logistique, douane, fret et devis clients")
         third = self.vault.source("Sourcing de candidats pour un cabinet de recrutement",
                                   "sourcing et recrutement, angle commercial")
         links.record_proposals(conn, links.analyze(conn), at=STAMP)
@@ -350,6 +358,138 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(check.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'mentor_project_link_proposals'").fetchone())
         check.close()
+
+
+class ProfileTests(unittest.TestCase):
+    def setUp(self):
+        _isolation.verifier()
+        self.vault = Vault()
+        self.conn = self.vault.conn
+        self.talent = self.vault.project("nexdoor_talent")
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_profiles_live_in_the_vault_and_reference_existing_projects(self):
+        stored = profiles.get_profile(self.conn, self.talent)
+        self.assertEqual(stored["project_name"], "Nexdoor Talent")
+        self.assertEqual(stored["profile_status"], "complete")
+        self.assertEqual(stored["named_entities"], ["Nexdoor Talent"])
+        self.assertIn("recrutement", [t["topic"] for t in stored["core_topics"]])
+        self.assertEqual([t["topic"] for t in stored["specific_tools"]], ["Manatal"])
+        with self.assertRaises(profiles.ProfileError):
+            profiles.upsert_profile(self.conn, 99999, {"description": "x"})
+        self.assertFalse(hasattr(links, "PROJECT_PROFILES"))
+
+    def test_seed_is_idempotent_and_never_overwrites_edits(self):
+        profiles.upsert_profile(self.conn, self.talent, {
+            "description": "Edite par Rosy", "core_topics": ["recrutement"],
+            "profile_source": "rosy-edit"})
+        result = setup_project_profiles.seed(self.conn)
+        self.assertEqual(result["activity:nexdoor_talent"], "kept")
+        self.assertEqual(profiles.get_profile(self.conn, self.talent)["description"],
+                         "Edite par Rosy")
+
+    def test_editing_a_profile_changes_results_without_code(self):
+        sid = self.vault.source("Onboarding et recrutement", "onboarding des recrues, ATS")
+        self.assertEqual(self.vault.candidates(sid)["Nexdoor Talent"]["level"], "low")
+        stored = profiles.get_profile(self.conn, self.talent)
+        stored["core_topics"].append({"topic": "onboarding", "terms": ["onboarding"]})
+        profiles.upsert_profile(self.conn, self.talent, stored)
+        self.assertEqual(self.vault.candidates(sid)["Nexdoor Talent"]["level"], "medium")
+
+    def test_export_import_roundtrip(self):
+        exported = profiles.export_profiles(self.conn)
+        exported[0]["description"] = "modifie"
+        profiles.import_profiles(self.conn, exported)
+        self.assertEqual(
+            profiles.get_profile(self.conn, exported[0]["entity_id"])["description"], "modifie")
+
+    def test_without_profile_only_the_exact_name_counts(self):
+        self.conn.execute("DELETE FROM mentor_project_profiles")
+        self.conn.commit()
+        named = self.vault.source("Nexdoor Talent : bilan")
+        themed = self.vault.source("Sourcing de candidats et recrutement", "angle commercial")
+        self.assertEqual(self.vault.candidates(named)["Nexdoor Talent"]["level"], "high")
+        self.assertEqual(self.vault.candidates(themed), {})
+
+    def test_weak_terms_never_count_alone(self):
+        sid = self.vault.source("Serveur MCP remote", "remote, freelance, certification, job")
+        self.assertNotIn("Recherche emploi remote", self.vault.candidates(sid))
+
+    def test_ambiguous_tool_name_make_is_not_matched(self):
+        sid = self.vault.source("How to make money with Zapier workflows")
+        cand = self.vault.candidates(sid)["Nexdoor Partners"]
+        terms = [str(s.get("term")).lower() for s in cand["signals"]]
+        self.assertIn("zapier", terms)
+        self.assertNotIn("make", terms)
+        self.assertNotIn(cand["level"], ("high", "medium"))
+
+    def test_personal_health_block_on_neuropsychology(self):
+        parent = self.vault.project("nexdoor_partners")
+        neuro = intelligence.upsert_entity(
+            self.conn, entity_type="vertical",
+            canonical_key="vertical:nexdoor_partners:neuropsychologues",
+            name="Verticale Neuropsychologues")
+        self.conn.execute(
+            "INSERT INTO intelligence_entity_bindings (entity_id, parent_entity_id, "
+            "canonical_path, synced_at) VALUES (?, ?, 'x', ?)", (neuro, parent, STAMP))
+        self.conn.commit()
+        setup_project_profiles.seed(self.conn)
+        business = self.vault.source(
+            "Atelier TDAH : formulaire d'orientation pour cabinet de neuropsychologue",
+            "prise de rendez-vous et agenda du cabinet")
+        personal = self.vault.source(
+            "Mon TDAH : nouveau traitement en cabinet de neuropsychologue",
+            "bilan neuropsychologique, medicament, agenda")
+        self.assertEqual(
+            self.vault.candidates(business)["Verticale Neuropsychologues"]["level"], "medium")
+        cand = self.vault.candidates(personal)["Verticale Neuropsychologues"]
+        self.assertEqual(cand["level"], "low")
+        self.assertIn("anti-signal", cand["reason"])
+
+
+class DecisionTests(unittest.TestCase):
+    def setUp(self):
+        _isolation.verifier()
+        self.vault = Vault()
+        self.conn = self.vault.conn
+        self.talent = self.vault.project("nexdoor_talent")
+        self.remote = self.vault.project("recherche_emploi_remote")
+        self.cv = self.vault.source("Prompt injections cachees dans des CV")
+        self.aws = self.vault.source("Se lancer sur AWS")
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_recorded_decisions_apply_only_the_approval(self):
+        approved = links.record_decision(
+            self.conn, source_id=self.cv, entity_id=self.talent, decision="approve",
+            level="medium", confidence=0.62, reason="dry-run v1",
+            explanation=["recrutement dans le titre"], rules_version="project-links-v1",
+            note="decision Rosy", at=STAMP)
+        rejected = links.record_decision(
+            self.conn, source_id=self.aws, entity_id=self.remote, decision="reject",
+            level="medium", confidence=0.60, reason="dry-run v1",
+            rules_version="project-links-v1", note="decision Rosy", at=STAMP)
+        self.assertEqual((approved["status"], rejected["status"]), ("approved", "rejected"))
+        self.assertEqual(approved["rules_version"], "project-links-v1")
+        rows = self.conn.execute(
+            "SELECT entity_id, source_id, role FROM intelligence_entity_sources "
+            "WHERE role = 'relevant_to'").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(self.talent, self.cv, "relevant_to")])
+        again = links.record_decision(
+            self.conn, source_id=self.aws, entity_id=self.remote, decision="approve",
+            level="medium", confidence=0.6, reason="x")
+        self.assertEqual(again["status"], "rejected")  # une decision n'est pas rejouee
+        links.record_proposals(self.conn, links.analyze(self.conn), at=STAMP)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM mentor_project_link_proposals WHERE source_id = ? "
+            "AND entity_id = ?", (self.aws, self.remote)).fetchone()[0], 1)
+        with self.assertRaises(links.ProjectLinkError):
+            links.record_decision(self.conn, source_id=9999, entity_id=self.talent,
+                                  decision="approve", level="medium", confidence=0.6,
+                                  reason="x")
 
 
 if __name__ == "__main__":

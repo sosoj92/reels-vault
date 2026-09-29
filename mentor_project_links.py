@@ -7,6 +7,9 @@ existante peut etre utile, SANS creer de faux rattachements.
 
 Reutilise :
 - intelligence_entities + intelligence_entity_bindings : les projets ;
+- mentor_project_profiles (vault.db) : ce qu'est chaque projet (donnees
+  editables, voir mentor_project_profiles.py) ; ce module ne garde que des
+  regles generiques ;
 - intelligence_entity_sources : le rattachement REEL, cree uniquement apres
   validation humaine (role `relevant_to`, note = proposition d'origine) ;
 - contents, tags, sous-themes, ressources : les signaux ;
@@ -41,131 +44,50 @@ import mentor_proactive_store as pstore
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "vault.db"
-RULES_VERSION = "project-links-v1"
+RULES_VERSION = "project-links-v2"
 LINK_ROLE = "relevant_to"
 
 LEVELS = ("high", "medium", "low", "ambiguous")
 REVIEWABLE_LEVELS = ("high", "medium")
 STATUSES = ("proposed", "approved", "rejected", "superseded")
 
-# ------------------------------------------------------------------ profils
+# ------------------------------------------------------------------ regles generiques
 #
-# Profils minimaux des projets. Chaque terme porte sa provenance :
-#   name     = nom du projet dans le Vault ;
-#   rosy     = exemple donne par Rosy (« Nexdoor Talent + sourcing/recrutement »,
-#              « Halidi + import/export/logistique ») ;
-#   synonym  = variante ou traduction directe d'un terme name/rosy ;
-#   inferred = deduit du nom, A VALIDER (poids faible : terme de contexte).
-# Les projets sans theme connu ne sont proposes que sur mention explicite.
-#
-# core    : CONCEPTS specifiques (synonymes regroupes) ; il en faut au moins
-#           2 distincts, plus un element de contexte.
-# context : termes d'appoint, jamais suffisants seuls.
-# named   : client/prospect : seul son nom peut le designer.
+# Les connaissances metier (sujets, noms, outils, exclusions de chaque projet)
+# vivent dans vault.db : table mentor_project_profiles (mentor_project_profiles.py).
+# Ce module ne contient que des regles GENERIQUES.
 
-PROJECT_PROFILES = {
-    "activity:nexdoor_talent": {
-        "names": {"nexdoor talent": "name"},
-        "core": {
-            "recrutement": ("rosy", ["recrutement", "recruter", "recruteur", "recruteurs",
-                                     "recruiting", "recruiter", "recruiters", "hiring",
-                                     "embauche"]),
-            "sourcing": ("rosy", ["sourcing", "chasse de tetes", "chasseur de tetes",
-                                  "headhunting", "headhunter", "talent acquisition"]),
-            "candidats": ("inferred", ["candidat", "candidats", "candidate", "candidates"]),
-        },
-        "context": {
-            "cv": "inferred", "linkedin": "inferred", "entretien": "inferred",
-            "commercial": "rosy", "commerciale": "rosy", "prospection": "inferred",
-        },
-    },
-    "activity:recherche_emploi_remote": {
-        "names": {"recherche emploi remote": "name"},
-        "core": {
-            "emploi": ("name", ["emploi", "job", "jobs", "offre d'emploi", "offres d'emploi",
-                                "job board"]),
-            "remote": ("name", ["remote", "full remote", "teletravail"]),
-            "candidature": ("inferred", ["candidature", "candidatures"]),
-        },
-        "context": {
-            "cv": "inferred", "freelance": "inferred", "certification": "inferred",
-            "certifications": "inferred", "carriere": "inferred",
-            "portfolio": "inferred", "entretien": "inferred",
-        },
-    },
-    "activity:side_businesses": {
-        "names": {
-            "side business": "name", "side businesses": "name",
-            "side hustle": "synonym",
-        },
-        "core": {},
-        "context": {},
-    },
-    "activity:nexdoor_partners": {
-        "names": {"nexdoor partners": "name"},
-        "core": {},
-        "context": {},
-    },
-    "vertical:nexdoor_partners:logistique": {
-        "names": {"verticale logistique": "name"},
-        "core": {
-            "logistique": ("name", ["logistique", "logisticien", "supply chain", "entrepot"]),
-            "transport": ("rosy", ["transport", "transporteur", "transporteurs", "fret",
-                                   "transitaire"]),
-            "import-export": ("rosy", ["import-export", "import/export", "douane"]),
-        },
-        "context": {"livraison": "inferred", "conteneur": "inferred", "camion": "inferred"},
-    },
-    "client:nexdoor_partners:logistique:halidi_transport_international": {
-        "names": {"halidi": "name", "halidi transport": "name",
-                  "halidi transport international": "name"},
-        "named": True,
-    },
-    "vertical:nexdoor_partners:neuropsychologues": {
-        "names": {"verticale neuropsychologues": "name"},
-        "core": {
-            "neuropsychologie": ("name", ["neuropsychologue", "neuropsychologues",
-                                          "neuropsychologie", "neuropsychologique",
-                                          "neuropsychologiques", "neuropsychologist"]),
-        },
-        "context": {"cabinet": "inferred", "psychologue": "inferred", "bilan": "inferred"},
-    },
-    "prospect:nexdoor_partners:neuropsychologues:neurosolutions_center": {
-        "names": {"neurosolutions": "name", "neurosolutions center": "name"},
-        "named": True,
-    },
-}
-
-# Alias partages entre plusieurs projets : jamais decisifs seuls.
-SHARED_ALIASES = {
-    "nexdoor": ("activity:nexdoor_partners", "activity:nexdoor_talent"),
-}
-
-# Outils, canaux et themes transversaux : jamais un signal de projet.
+# Outils et termes universels : jamais un signal de projet, quel que soit le profil.
 GENERIC_TERMS = frozenset({
     "ia", "ai", "chatgpt", "claude", "claude code", "codex", "llm", "gpt",
-    "automation", "automatisation", "automatiser", "agent", "agents", "agent ia",
-    "prompt", "prompts", "outil", "outils", "tool", "tools", "saas", "business",
-    "startup", "github", "notion", "api", "no-code", "workflow", "productivite",
+    "prompt", "prompts", "outil", "outils", "tool", "tools", "agent", "agents",
+    "agent ia",
 })
 
+# Un client ou un prospect se designe par son nom : ses sujets seuls ne suffisent pas.
+NAME_ONLY_TYPES = frozenset({"client", "prospect"})
+
 WEIGHTS = {
-    "name": 0.85,            # nom complet du projet ou du client/prospect
-    "shared_alias": 0.40,    # « Nexdoor » seul : plusieurs projets possibles
-    "core": 0.30,            # par terme specifique distinct (max 3)
-    "core_ai_only": 0.15,    # terme vu seulement dans le resume IA (seconde main)
-    "context": 0.10,         # par terme de contexte distinct (max 2)
-    "classification": 0.15,  # tag / sous-theme / categorie du Vault = terme du profil
+    "name": 0.85,            # nom du projet / entite nommee du profil cite
+    "shared_alias": 0.40,    # debut de nom partage par plusieurs projets (« Nexdoor »)
+    "core": 0.30,            # par sujet principal distinct (max 3)
+    "tool": 0.30,            # par outil specifique du profil (compte comme sujet)
+    "core_ai_only": 0.15,    # sujet vu seulement dans le resume IA (seconde main)
+    "context": 0.10,         # par sujet de contexte distinct (max 2)
+    "classification": 0.15,  # tag / sous-theme / categorie du Vault = sujet du profil
     "proximity": 0.25,       # par source deja liee au projet et proche (max 2)
     "active": 0.05,          # projet marque « Maintenant »
 }
 MEDIUM_MIN = 0.55
 HIGH_MIN = 0.80
 AMBIGUITY_GAP = 0.15
+MAX_CONCEPTS = 3
+MAX_CONTEXT = 2
 
 PRIMARY_FIELDS = ("title", "description_manual", "description_original", "transcript")
 SECOND_HAND_FIELDS = ("description_ai",)
 CLASSIFICATION_FIELDS = ("tags", "subthemes", "category")
+CONCEPT_KINDS = ("core", "tool", "core_ai_only")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mentor_project_link_proposals (
@@ -212,21 +134,25 @@ def _term_pattern(term):
     return re.compile(r"(?<![a-z0-9])" + re.escape(fold(term)) + r"(?![a-z0-9])")
 
 
-def _excerpt(text, match, width=60):
-    start = max(0, match.start() - width)
-    end = min(len(text), match.end() + width)
-    return ("..." if start else "") + text[start:end].strip() + ("..." if end < len(text) else "")
+def _excerpt(text, start, end, width=60):
+    left = max(0, start - width)
+    right = min(len(text), end + width)
+    return ("..." if left else "") + text[left:right].strip() + ("..." if right < len(text) else "")
 
 
-def _find(term, fields):
-    """Premiere occurrence du terme par champ : {champ: extrait}."""
+def _spans(term, fields):
+    """Premiere occurrence du terme par champ : {champ: (debut, fin, extrait)}."""
     pattern = _term_pattern(term)
     found = {}
     for field, text in fields.items():
         match = pattern.search(text)
         if match:
-            found[field] = _excerpt(text, match)
+            found[field] = (match.start(), match.end(), _excerpt(text, match.start(), match.end()))
     return found
+
+
+def _find(term, fields):
+    return {field: span[2] for field, span in _spans(term, fields).items()}
 
 
 def _noisy_or(weights):
@@ -244,9 +170,42 @@ def _table_exists(conn, table):
     ).fetchone() is not None
 
 
+def _compile_profile(entity, stored):
+    """Profil stocke -> structure de matching. Aucun sujet invente."""
+    stored = stored or {}
+    weak = {fold(e["term"]) for e in stored.get("excluded_topics", [])
+            if e["mode"] == "alone_insufficient"}
+    block = [e["term"] for e in stored.get("excluded_topics", []) if e["mode"] == "block"]
+
+    def concepts(items, kind):
+        result = []
+        for item in items or []:
+            terms = [t for t in item["terms"]
+                     if fold(t) not in GENERIC_TERMS and fold(t) not in weak]
+            if terms:
+                result.append({"topic": item["topic"], "terms": terms, "kind": kind,
+                               "provenance": item.get("provenance")})
+        return result
+
+    names = {fold(entity["name"]): "nom du projet"}
+    for name in stored.get("named_entities", []):
+        names.setdefault(fold(name), "entite nommee du profil")
+    return {
+        "names": names,
+        "core": concepts(stored.get("core_topics"), "core")
+        + concepts(stored.get("specific_tools"), "tool"),
+        "context": [dict(c, kind="context") for c in concepts(stored.get("context_topics"),
+                                                              "context")],
+        "block": block,
+        "status": stored.get("profile_status", "missing"),
+        "source": stored.get("profile_source"),
+    }
+
+
 def load_projects(conn):
-    """Projets connus du Vault, relies a leur profil par canonical_key."""
+    """Projets connus du Vault, avec leur profil lu dans vault.db."""
     import mentor_proactive as proactive
+    import mentor_project_profiles as profiles
 
     view = proactive.VaultView(conn)
     projects = {}
@@ -257,14 +216,29 @@ def load_projects(conn):
             (entity_id,),
         ).fetchone()
         entity = dict(row)
-        profile = PROJECT_PROFILES.get(entity["canonical_key"])
-        if profile is None:
-            # Projet sans profil : seul son nom exact peut le designer.
-            profile = {"names": {entity["name"].lower(): "name"}, "core": {}, "context": {}}
-        entity["profile"] = profile
+        entity["profile"] = _compile_profile(entity, profiles.get_profile(conn, entity_id))
         entity["parent_entity_id"] = view.entity(entity_id)["parent_entity_id"]
         projects[entity_id] = entity
     return projects
+
+
+def _shared_aliases(projects):
+    """Premier mot d'un nom partage par plusieurs projets non apparentes (« nexdoor »)."""
+    owners = {}
+    for pid, project in projects.items():
+        for name in project["profile"]["names"]:
+            first = name.split(" ")[0]
+            if len(first) >= 4 and first != name:
+                owners.setdefault(first, set()).add(pid)
+    aliases = {}
+    for alias, pids in owners.items():
+        if len(pids) < 2:
+            continue
+        unrelated = [p for p in pids if not any(
+            q in _ancestors(projects, p) for q in pids if q != p)]
+        if len(unrelated) >= 2:
+            aliases[alias] = sorted(unrelated)
+    return aliases
 
 
 def _ancestors(projects, entity_id):
@@ -310,8 +284,6 @@ def load_sources(conn):
                     fields["tags"] = " | ".join(fold(t) for t in tags)
                 if subthemes:
                     fields["subthemes"] = " | ".join(fold(s) for s in subthemes)
-                source["tags"] = tags
-                source["subthemes"] = subthemes
         source["fields"] = {k: v for k, v in fields.items() if v}
         source["display_title"] = raw.get("title") or source["title"]
         sources.append(source)
@@ -330,8 +302,8 @@ def _linked_sources(conn):
     return links
 
 
-def _source_entities(conn, generic_names):
-    """Entites specifiques (non generiques) citees par chaque source."""
+def _source_entities(conn, project_ids):
+    """Entites specifiques (ni generiques, ni projets) citees par chaque source."""
     result = {}
     if not _table_exists(conn, "intelligence_entity_sources"):
         return result
@@ -339,7 +311,7 @@ def _source_entities(conn, generic_names):
         "SELECT es.source_id, e.id, e.name FROM intelligence_entity_sources es "
         "JOIN intelligence_entities e ON e.id = es.entity_id WHERE es.role <> 'primary'"
     ).fetchall():
-        if fold(name) in generic_names:
+        if fold(name) in GENERIC_TERMS or entity_id in project_ids:
             continue
         result.setdefault(source_id, {})[entity_id] = name
     return result
@@ -347,7 +319,54 @@ def _source_entities(conn, generic_names):
 
 # ------------------------------------------------------------------ analyse
 
-def _signals_for(project, source, *, proximity, sensitive):
+def _concept_signals(profile, primary, second_hand):
+    """
+    Un signal par sujet. Deux sujets qui se chevauchent dans le texte
+    (« recrutement » dans « recrutement tech ») ne comptent qu'une fois : le plus long.
+    """
+    hits = []
+    for concept in profile["core"]:
+        for term in sorted(concept["terms"], key=len, reverse=True):
+            spans = _spans(term, primary)
+            kind = concept["kind"]
+            if not spans:
+                spans = _spans(term, second_hand)
+                kind = "core_ai_only" if spans else kind
+            if spans:
+                hits.append({"concept": concept, "term": term, "kind": kind, "spans": spans})
+                break
+    hits.sort(key=lambda h: -max(e - s for s, e, _ in h["spans"].values()))
+    accepted, taken = [], []
+    for hit in hits:
+        overlaps = any(
+            field == other_field and s < oe and os_ < e
+            for field, (s, e, _) in hit["spans"].items()
+            for other_field, (os_, oe) in taken
+        )
+        if overlaps and all(
+            any(field == of and s < oe and os_ < e for of, (os_, oe) in taken)
+            for field, (s, e, _) in hit["spans"].items()
+        ):
+            continue
+        accepted.append(hit)
+        taken.extend((field, (s, e)) for field, (s, e, _) in hit["spans"].items())
+    signals = []
+    for hit in sorted(accepted, key=lambda h: (CONCEPT_KINDS.index(h["kind"]),
+                                                 hit_order(h)))[:MAX_CONCEPTS]:
+        signals.append({
+            "kind": hit["kind"], "concept": hit["concept"]["topic"], "term": hit["term"],
+            "provenance": hit["concept"].get("provenance"),
+            "fields": {f: span[2] for f, span in hit["spans"].items()},
+            "weight": WEIGHTS[hit["kind"]],
+        })
+    return signals
+
+
+def hit_order(hit):
+    return hit["concept"]["topic"]
+
+
+def _signals_for(project, source, *, proximity):
     profile = project["profile"]
     fields = source["fields"]
     primary = {k: v for k, v in fields.items() if k in PRIMARY_FIELDS}
@@ -355,91 +374,88 @@ def _signals_for(project, source, *, proximity, sensitive):
     classification = {k: v for k, v in fields.items() if k in CLASSIFICATION_FIELDS}
     signals = []
 
-    for term, provenance in profile.get("names", {}).items():
-        found = _find(term, {**primary, **second_hand})
+    names = []
+    for name, provenance in profile["names"].items():
+        found = _find(name, {**primary, **second_hand})
         if found:
-            signals.append({"kind": "name", "term": term, "provenance": provenance,
-                            "fields": found, "weight": WEIGHTS["name"]})
-    if any(s["kind"] == "name" for s in signals):
-        signals = [max(
-            (s for s in signals if s["kind"] == "name"), key=lambda s: len(s["term"])
-        )]
+            names.append({"kind": "name", "term": name, "provenance": provenance,
+                          "fields": found, "weight": WEIGHTS["name"]})
+    if names:
+        signals.append(max(names, key=lambda s: len(s["term"])))
 
-    if not profile.get("named"):
-        # Un signal par CONCEPT (les synonymes d'une meme idee ne s'additionnent pas).
-        concepts = 0
-        for concept, (provenance, terms) in profile.get("core", {}).items():
-            if concepts >= 3:
-                break
-            best = None
-            for term in sorted(terms, key=len, reverse=True):
-                if fold(term) in GENERIC_TERMS:
-                    continue
-                in_primary = _find(term, primary)
-                in_ai = _find(term, second_hand)
-                if in_primary:
-                    best = ("core", term, in_primary)
-                    break
-                if in_ai and best is None:
-                    best = ("core_ai_only", term, in_ai)
-            if best:
-                kind, term, found = best
-                signals.append({"kind": kind, "concept": concept, "term": term,
-                                "provenance": provenance, "fields": found,
-                                "weight": WEIGHTS[kind]})
-                concepts += 1
+    signals.extend(_concept_signals(profile, primary, second_hand))
 
-        context = []
-        for term, provenance in profile.get("context", {}).items():
+    context = []
+    for concept in profile["context"]:
+        for term in sorted(concept["terms"], key=len, reverse=True):
             found = _find(term, {**primary, **second_hand, **classification})
-            if found and fold(term) not in GENERIC_TERMS:
-                context.append({"kind": "context", "term": term, "provenance": provenance,
-                                "fields": found, "weight": WEIGHTS["context"]})
-        signals.extend(context[:2])
-
-        for concept, (provenance, terms) in profile.get("core", {}).items():
-            hit = next(((t, f) for t in terms for f in [_find(t, classification)] if f), None)
-            if hit:
-                signals.append({"kind": "classification", "concept": concept,
-                                "term": hit[0], "provenance": provenance,
-                                "fields": hit[1], "weight": WEIGHTS["classification"]})
+            if found:
+                context.append({"kind": "context", "concept": concept["topic"], "term": term,
+                                "provenance": concept.get("provenance"), "fields": found,
+                                "weight": WEIGHTS["context"]})
                 break
+    signals.extend(context[:MAX_CONTEXT])
+
+    for concept in profile["core"]:
+        hit = next(((t, f) for t in concept["terms"] for f in [_find(t, classification)] if f),
+                   None)
+        if hit:
+            signals.append({"kind": "classification", "concept": concept["topic"],
+                            "term": hit[0], "provenance": concept.get("provenance"),
+                            "fields": hit[1], "weight": WEIGHTS["classification"]})
+            break
 
     for item in proximity[:2]:
         signals.append({"kind": "proximity", "weight": WEIGHTS["proximity"], **item})
-    if project["attention_status"] == "now":
+    if project["attention_status"] == "now" and signals:
         signals.append({"kind": "active", "weight": WEIGHTS["active"]})
-    return signals
+
+    blocked = []
+    for term in profile["block"]:
+        found = _find(term, {**primary, **second_hand})
+        if found:
+            blocked.append({"term": term, "fields": found})
+    return signals, blocked
 
 
-def _level(project, signals, sensitive):
-    kinds = [s["kind"] for s in signals]
-    confidence = _noisy_or(s["weight"] for s in signals)
-    core_count = sum(1 for k in kinds if k in ("core", "core_ai_only"))
-    strong_core = kinds.count("core")
-    support = ("context" in kinds or "classification" in kinds or "proximity" in kinds)
-
+def _level(project, signals, *, sensitive, blocked):
     if not signals:
         return None, 0.0, None
+    kinds = [s["kind"] for s in signals]
+    confidence = _noisy_or(s["weight"] for s in signals)
+    concept_count = sum(1 for k in kinds if k in CONCEPT_KINDS)
+    strong = sum(1 for k in kinds if k in ("core", "tool"))
+    support = any(k in kinds for k in ("context", "classification", "proximity"))
+
     if "name" in kinds:
         return "high", max(confidence, WEIGHTS["name"]), "mention explicite du projet"
-    if sensitive:
+    if blocked:
+        terms = ", ".join(sorted({b["term"] for b in blocked}))
+        return "low", confidence, f"anti-signal du profil ({terms}) : jamais rattache"
+    # Source sensible : plafonnee a LOW, sauf pour un projet dont le profil declare ses
+    # propres anti-signaux (ex. sante personnelle) et qu'aucun n'est present.
+    health_guarded = bool(project["profile"]["block"])
+    if sensitive and not health_guarded:
         return "low", confidence, "source sensible (sante/finance/droit) sans mention explicite du projet"
-    # Un troisieme concept distinct vaut element de contexte.
-    if core_count >= 2 and strong_core >= 1 and (support or core_count >= 3):
-        independent = len({k for k in kinds if k in ("core", "classification", "proximity")})
-        if independent >= 3 and confidence >= HIGH_MIN:
+    if project["entity_type"] in NAME_ONLY_TYPES:
+        return "low", confidence, "un client/prospect se designe par son nom"
+    # Un troisieme sujet distinct vaut element de contexte.
+    if concept_count >= 2 and strong >= 1 and (support or concept_count >= 3):
+        independent = len({k for k in kinds if k in ("core", "tool", "classification",
+                                                     "proximity")})
+        if independent >= 3 and confidence >= HIGH_MIN and not sensitive:
             return "high", confidence, "plusieurs signaux independants coherents"
         if confidence >= MEDIUM_MIN:
-            return "medium", confidence, "theme du projet present avec des elements de contexte"
-        return "low", confidence, "theme present mais signaux trop faibles"
-    if core_count >= 2:
-        return "low", confidence, "theme du projet sans element de contexte"
-    if core_count == 1:
-        return "low", confidence, "un seul terme du projet : simple mot-cle"
-    if signals:
-        return "low", confidence, "seulement des termes de contexte"
-    return None, 0.0, None
+            reason = "sujets du projet presents avec des elements de contexte"
+            if sensitive:
+                reason += " (source sensible : verifier qu'il ne s'agit pas de sante personnelle)"
+            return "medium", confidence, reason
+        return "low", confidence, "sujets presents mais signaux trop faibles"
+    if concept_count >= 2:
+        return "low", confidence, "sujets du projet sans element de contexte"
+    if concept_count == 1:
+        return "low", confidence, "un seul sujet du projet : simple mot-cle"
+    return "low", confidence, "seulement des elements de contexte"
 
 
 def analyze(conn):
@@ -449,10 +465,9 @@ def analyze(conn):
     projects = load_projects(conn)
     sources = load_sources(conn)
     linked = _linked_sources(conn)
-    generic_names = set(GENERIC_TERMS)
-    source_entities = _source_entities(conn, generic_names)
+    source_entities = _source_entities(conn, set(projects))
+    aliases = _shared_aliases(projects)
     view = proactive.VaultView(conn)
-    by_key = {p["canonical_key"]: pid for pid, p in projects.items()}
 
     results = []
     for source in sources:
@@ -467,37 +482,36 @@ def analyze(conn):
             for other in sorted(linked.get(pid, set()) - {sid}):
                 shared = sorted(set(mine) & set(source_entities.get(other, {})))
                 if shared:
-                    proximity.append({
-                        "source_id": other,
-                        "shared_entities": [mine[e] for e in shared],
-                    })
-            signals = _signals_for(project, source, proximity=proximity, sensitive=sensitive)
-            level, confidence, reason = _level(project, signals, sensitive)
+                    proximity.append({"source_id": other,
+                                      "shared_entities": [mine[e] for e in shared]})
+            signals, blocked = _signals_for(project, source, proximity=proximity)
+            level, confidence, reason = _level(project, signals, sensitive=sensitive,
+                                               blocked=blocked)
             if level is None:
                 continue
             candidates.append({
                 "source_id": sid, "entity_id": pid, "project": project["name"],
                 "project_type": project["entity_type"], "level": level,
                 "confidence": round(confidence, 3), "reason": reason,
-                "signals": signals,
+                "signals": signals, "blocked": blocked,
             })
 
-        # « Nexdoor » seul : plusieurs projets possibles.
-        for alias, keys in SHARED_ALIASES.items():
-            found = _find(alias, {k: v for k, v in source["fields"].items()
-                                  if k not in CLASSIFICATION_FIELDS})
-            named = {c["entity_id"] for c in candidates if c["level"] == "high"}
-            ids = [by_key[k] for k in keys if k in by_key]
-            if found and not named & set(ids) and ids:
+        text_fields = {k: v for k, v in source["fields"].items()
+                       if k not in CLASSIFICATION_FIELDS}
+        named = {c["entity_id"] for c in candidates if "name" in
+                 [s["kind"] for s in c["signals"]]}
+        for alias, ids in aliases.items():
+            found = _find(alias, text_fields)
+            if found and not named & set(ids):
                 candidates.append({
-                    "source_id": sid, "entity_id": ids[0], "project": " / ".join(
-                        projects[i]["name"] for i in ids),
+                    "source_id": sid, "entity_id": ids[0],
+                    "project": " / ".join(projects[i]["name"] for i in ids),
                     "project_type": "shared_alias", "level": "ambiguous",
                     "confidence": WEIGHTS["shared_alias"],
                     "reason": f"alias '{alias}' partage par plusieurs projets",
                     "signals": [{"kind": "shared_alias", "term": alias, "fields": found,
                                  "weight": WEIGHTS["shared_alias"]}],
-                    "competitors": ids,
+                    "blocked": [], "competitors": ids,
                 })
 
         _resolve_competition(candidates, projects)
@@ -541,15 +555,16 @@ def _resolve_competition(candidates, projects):
 SIGNAL_LABELS = {
     "name": "mention explicite",
     "shared_alias": "alias partage",
-    "core": "terme du projet",
-    "core_ai_only": "terme du projet (resume IA seulement, seconde main)",
+    "core": "sujet du projet",
+    "core_ai_only": "sujet du projet (resume IA seulement, seconde main)",
+    "tool": "outil specifique du projet",
     "context": "element de contexte",
     "classification": "classement du Vault",
     "proximity": "proche d'une source deja liee au projet",
     "active": "projet marque Maintenant",
 }
 PROVENANCE_LABELS = {
-    "name": "nom du projet", "rosy": "exemple de Rosy",
+    "name": "nom du projet", "rosy": "profil de Rosy",
     "synonym": "synonyme", "inferred": "deduit, a valider",
 }
 
@@ -567,7 +582,8 @@ def explain(candidate):
             continue
         where = ", ".join(signal["fields"])
         excerpt = next(iter(signal["fields"].values()))
-        provenance = PROVENANCE_LABELS.get(signal.get("provenance"), "")
+        provenance = PROVENANCE_LABELS.get(signal.get("provenance"),
+                                           signal.get("provenance") or "")
         what = (f"'{signal['concept']}' (mot '{signal['term']}')"
                 if signal.get("concept") and signal["concept"] != signal["term"]
                 else f"'{signal['term']}'")
@@ -723,6 +739,53 @@ def reject(conn, proposal_id, *, reviewed_by="rosy", note=None, at=None):
     )
     conn.commit()
     return get_proposal(conn, proposal_id)
+
+
+def record_decision(conn, *, source_id, entity_id, decision, level, confidence, reason,
+                    explanation=(), rules_version=RULES_VERSION, reviewed_by="rosy",
+                    note=None, at=None):
+    """
+    Enregistre une decision humaine prise sur un dry-run deja presente
+    (sans passer par --review). decision = 'approve' | 'reject'.
+    Idempotent : une paire deja decidee n'est pas modifiee.
+    """
+    if decision not in ("approve", "reject"):
+        raise ProjectLinkError("decision = approve ou reject")
+    ensure_schema(conn)
+    for table, key in (("intelligence_sources", source_id), ("intelligence_entities", entity_id)):
+        if conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (key,)).fetchone() is None:
+            raise ProjectLinkError(f"{table} {key} introuvable")
+    decided = conn.execute(
+        "SELECT proposal_id FROM mentor_project_link_proposals WHERE source_id = ? "
+        "AND entity_id = ? AND status IN ('approved', 'rejected')",
+        (source_id, entity_id),
+    ).fetchone()
+    if decided:
+        return get_proposal(conn, decided[0])
+    at = at or pstore.now_iso()
+    conn.execute(
+        "UPDATE mentor_project_link_proposals SET status = 'superseded', updated_at = ? "
+        "WHERE source_id = ? AND entity_id = ? AND status = 'proposed'",
+        (at, source_id, entity_id),
+    )
+    proposal_id = _next_id(conn)
+    fingerprint = pstore.sha256(json.dumps(
+        [rules_version, source_id, entity_id, level, "human_decision"], ensure_ascii=False))
+    conn.execute(
+        """
+        INSERT INTO mentor_project_link_proposals (
+            proposal_id, source_id, entity_id, confidence, confidence_level, reason,
+            evidence_json, rules_version, fingerprint, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
+        """,
+        (proposal_id, source_id, entity_id, float(confidence), level, reason,
+         pstore.dumps({"explanation": list(explanation), "recorded_from": "dry-run"}),
+         rules_version, fingerprint, at, at),
+    )
+    conn.commit()
+    if decision == "approve":
+        return approve(conn, proposal_id, reviewed_by=reviewed_by, note=note, at=at)
+    return reject(conn, proposal_id, reviewed_by=reviewed_by, note=note, at=at)
 
 
 # ------------------------------------------------------------------ rapport

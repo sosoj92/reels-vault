@@ -136,3 +136,18 @@ LOW/AMBIGUOUS ne sont jamais appliqués ; HIGH non plus sans validation humaine.
 Modes de consultation Agency (stockés, non exécutés) : A = agent nommé par Rosy ;
 B = agents choisis automatiquement pour une question de Rosy ; C = agents choisis par le Mentor
 pour évaluer un candidat avant suggestion.
+
+## Profils de projet persistants (`mentor_project_profiles`, rules `project-links-v2`)
+
+Les connaissances métier ne sont plus dans le code : table additive `mentor_project_profiles`
+(une ligne par entité projet existante : `description`, `core_topics`, `context_topics`,
+`named_entities`, `specific_tools`, `excluded_topics`, `profile_status`, `profile_source`, `notes`).
+`intelligence_entities.summary/metadata` ne sont pas réutilisés (texte libre / JSON d'identité écrit par d'autres modules).
+
+- Profils initiaux : `setup_project_profiles.py` (données de Rosy du 2026-09-29) ; ne remplace jamais un profil existant sans `--force`.
+- Édition : `mentor_project_profiles.py --export profils.json`, modifier, puis `--import profils.json`.
+- Sujet = idée ; `terms` = ses variantes (pluriels, traductions). Deux sujets qui se chevauchent dans le texte comptent une fois.
+- Exclusions : `alone_insufficient` (ne compte jamais comme sujet) ; `block` (empêche toute proposition sans mention explicite — santé personnelle en neuropsychologie).
+- Règles génériques restées dans le code : termes universels (IA, ChatGPT, Claude…), un client/prospect se désigne par son nom,
+  alias partagés dérivés des noms (« nexdoor »), plafond des sources sensibles (sauf projet qui déclare ses anti-signaux santé).
+- Décisions prises sur un dry-run : `record_decision()` (PL-0001 source 16 → Nexdoor Talent approuvée, PL-0002 source 12 → Recherche emploi remote refusée).
