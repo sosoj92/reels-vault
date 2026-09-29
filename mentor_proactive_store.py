@@ -32,7 +32,7 @@ import v2_guard
 ROOT = Path(__file__).resolve().parent
 FLAG = ROOT / "mentor_proactive.enabled"
 
-PROACTIVE_SCHEMA_VERSION = 1
+PROACTIVE_SCHEMA_VERSION = 2
 
 EVENT_TYPES = (
     "source_ingested",
@@ -220,6 +220,35 @@ CREATE INDEX IF NOT EXISTS idx_mentor_consultations_suggestion
 CREATE INDEX IF NOT EXISTS idx_mentor_consultations_session
     ON mentor_agent_consultations(session_id);
 
+CREATE TABLE IF NOT EXISTS mentor_notifications (
+    notification_id TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL CHECK (kind IN ('push', 'digest', 'detail', 'status')),
+    channel         TEXT NOT NULL CHECK (channel IN ('telegram', 'notion', 'none')),
+    suggestion_ids  TEXT NOT NULL DEFAULT '[]',
+    chat_id         TEXT,
+    message_id      TEXT,
+    status          TEXT NOT NULL DEFAULT 'sent'
+                    CHECK (status IN ('sent', 'failed', 'suppressed')),
+    detail          TEXT,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mentor_notifications_created
+    ON mentor_notifications(created_at, kind);
+
+CREATE TABLE IF NOT EXISTS mentor_feedback (
+    feedback_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    suggestion_id  TEXT NOT NULL REFERENCES mentor_suggestions(suggestion_id),
+    reason         TEXT NOT NULL CHECK (reason IN
+                     ('not_now', 'already_known', 'off_topic', 'bad_idea', 'no_thanks')),
+    project_id     INTEGER,
+    suggestion_type TEXT NOT NULL,
+    focus_key      TEXT,
+    channel        TEXT NOT NULL DEFAULT 'telegram',
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mentor_feedback_project
+    ON mentor_feedback(project_id, suggestion_type, created_at);
+
 CREATE TABLE IF NOT EXISTS mentor_watch_state (
     watch_key  TEXT PRIMARY KEY,
     state_hash TEXT NOT NULL,
@@ -234,7 +263,11 @@ TABLES = (
     "mentor_suggestions",
     "mentor_agent_consultations",
     "mentor_watch_state",
+    "mentor_notifications",
+    "mentor_feedback",
 )
+
+FEEDBACK_REASONS = ("not_now", "already_known", "off_topic", "bad_idea", "no_thanks")
 
 
 class ProactiveStoreError(ValueError):
@@ -833,3 +866,141 @@ def list_consultations(conn, *, suggestion_id=None, session_id=None):
         item["evidence_refs"] = loads(item["evidence_refs"], [])
         rows.append(item)
     return rows
+
+
+def attach_consultations(conn, session_id, suggestion_id, *, commit=True):
+    """Relie les consultations d'une evaluation (mode C) a la suggestion creee."""
+    conn.execute(
+        "UPDATE mentor_agent_consultations SET suggestion_id = ? WHERE session_id = ?",
+        (suggestion_id, session_id),
+    )
+    if commit:
+        conn.commit()
+
+
+# ------------------------------------------------------------------ notifications
+
+def record_notification(conn, *, kind, channel, suggestion_ids, chat_id=None,
+                        message_id=None, status="sent", detail=None, at=None, commit=True):
+    require_writes(conn, "journal de notification")
+    notification_id = "NTF-" + uuid.uuid4().hex[:12]
+    conn.execute(
+        """
+        INSERT INTO mentor_notifications (notification_id, kind, channel, suggestion_ids,
+            chat_id, message_id, status, detail, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (notification_id, kind, channel, dumps(list(suggestion_ids)),
+         None if chat_id is None else str(chat_id),
+         None if message_id is None else str(message_id), status, detail, at or now_iso()),
+    )
+    if commit:
+        conn.commit()
+    return notification_id
+
+
+def notifications(conn, *, kind=None, since=None):
+    if not schema_present(conn):
+        return []
+    sql = "SELECT * FROM mentor_notifications WHERE 1 = 1"
+    params = []
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    if since:
+        sql += " AND created_at >= ?"
+        params.append(since)
+    rows = []
+    for row in conn.execute(sql + " ORDER BY created_at, notification_id", params).fetchall():
+        item = dict(row)
+        item["suggestion_ids"] = loads(item["suggestion_ids"], [])
+        rows.append(item)
+    return rows
+
+
+def was_presented(conn, suggestion_id):
+    for item in notifications(conn):
+        if suggestion_id in item["suggestion_ids"] and item["status"] == "sent" \
+                and item["kind"] in ("push", "digest", "detail"):
+            return True
+    return False
+
+
+# ------------------------------------------------------------------ retours
+
+def record_feedback(conn, suggestion_id, reason, *, channel="telegram", at=None, commit=True):
+    require_writes(conn, "retour de pertinence")
+    if reason not in FEEDBACK_REASONS:
+        raise ProactiveStoreError(f"raison inconnue : {reason!r}")
+    suggestion = get_suggestion(conn, suggestion_id)
+    if suggestion is None:
+        raise ProactiveStoreError(f"suggestion introuvable : {suggestion_id}")
+    candidate = get_candidate(conn, suggestion["candidate_id"]) or {}
+    conn.execute(
+        """
+        INSERT INTO mentor_feedback (suggestion_id, reason, project_id, suggestion_type,
+            focus_key, channel, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (suggestion_id, reason, suggestion.get("project_id"), suggestion["suggestion_type"],
+         candidate.get("focus_key"), channel, at or now_iso()),
+    )
+    if commit:
+        conn.commit()
+
+
+def feedback_since(conn, since):
+    if not schema_present(conn):
+        return []
+    return [dict(row) for row in conn.execute(
+        "SELECT * FROM mentor_feedback WHERE created_at >= ? ORDER BY created_at", (since,)
+    ).fetchall()]
+
+
+def list_suggestions(conn, status=None):
+    if not schema_present(conn):
+        return []
+    sql = "SELECT * FROM mentor_suggestions"
+    params = []
+    if status:
+        statuses = [status] if isinstance(status, str) else list(status)
+        sql += f" WHERE status IN ({','.join('?' for _ in statuses)})"
+        params.extend(statuses)
+    sql += " ORDER BY score DESC, created_at, suggestion_id"
+    return [_decode_suggestion(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def update_suggestion_text(conn, suggestion_id, *, title=None, summary=None, by="rosy",
+                           at=None):
+    """Modification manuelle (prioritaire) du texte d'une suggestion."""
+    require_writes(conn, "modification de suggestion")
+    suggestion = get_suggestion(conn, suggestion_id)
+    if suggestion is None:
+        raise ProactiveStoreError(f"suggestion introuvable : {suggestion_id}")
+    at = at or now_iso()
+    evidence = dict(suggestion["evidence"])
+    evidence.setdefault("manual_edits", []).append({"by": by, "at": at})
+    conn.execute(
+        "UPDATE mentor_suggestions SET title = COALESCE(?, title), "
+        "summary = COALESCE(?, summary), evidence = ?, updated_at = ? WHERE suggestion_id = ?",
+        (title, summary, dumps(evidence), at, suggestion_id),
+    )
+    conn.commit()
+    return get_suggestion(conn, suggestion_id)
+
+
+def set_telegram_message(conn, suggestion_id, message_id, *, at=None):
+    conn.execute(
+        "UPDATE mentor_suggestions SET telegram_message_id = ?, updated_at = ? "
+        "WHERE suggestion_id = ?",
+        (None if message_id is None else str(message_id), at or now_iso(), suggestion_id),
+    )
+    conn.commit()
+
+
+def set_notion_page(conn, suggestion_id, page_id, *, at=None):
+    conn.execute(
+        "UPDATE mentor_suggestions SET notion_page_id = ?, updated_at = ? "
+        "WHERE suggestion_id = ?",
+        (page_id, at or now_iso(), suggestion_id),
+    )
+    conn.commit()

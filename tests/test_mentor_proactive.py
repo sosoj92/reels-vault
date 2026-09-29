@@ -93,7 +93,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual([tuple(r) for r in schema_before], [tuple(r) for r in schema_after])
         self.assertEqual(conn.execute(
             "SELECT value FROM meta WHERE key='mentor_proactive_schema_version'"
-        ).fetchone()[0], "1")
+        ).fetchone()[0], str(store.PROACTIVE_SCHEMA_VERSION))
         conn.close()
 
     def test_real_vault_is_locked_until_validation(self):

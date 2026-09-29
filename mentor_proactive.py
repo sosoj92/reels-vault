@@ -84,10 +84,11 @@ WEIGHTS = {
 }
 PRIORITY_FACTOR = {1: 1.0, 2: 0.75, 3: 0.5, 4: 0.25}
 
-# Phase 2 : etapes de revue appliquees a la shortlist (Qwen, puis Agency
-# Agents via vault_orchestrator / vault_agent_registry). Vide en phase 1 :
-# aucune n'est appelee automatiquement.
+# Revue de la shortlist (Qwen puis Agency Agents mode C) : mentor_council.
+# Jamais dans la passe elle-meme : seulement avec --with-agents (tache planifiee,
+# PC au repos). La passe reste deterministe et sans LLM.
 REVIEW_STAGES = ()
+DEFAULT_DEBOUNCE_MINUTES = 10
 
 TYPE_LABELS = {
     "convergence": "Convergence",
@@ -1131,8 +1132,18 @@ def apply_shortlist(conn, limit, *, at):
 
 # ------------------------------------------------------------------ passe
 
+def _debounced(conn, event, moment, minutes):
+    """Ingestion regroupee : une source trop recente attend la passe suivante."""
+    if minutes <= 0 or event["event_type"] != "source_ingested":
+        return False
+    row = conn.execute("SELECT created_at FROM intelligence_sources WHERE id = ?",
+                       (event["entity_id"],)).fetchone()
+    created = _parse_dt(row[0]) if row else None
+    return created is not None and moment - created < timedelta(minutes=minutes)
+
+
 def run_pass(conn, *, now=None, limit=500, shortlist_limit=DEFAULT_SHORTLIST_LIMIT,
-             scan=True):
+             scan=True, debounce_minutes=0):
     """
     Passe proactive : (publication) -> evenements en attente -> candidats ->
     score -> dedoublonnage -> shortlist. Chaque evenement est valide
@@ -1151,6 +1162,14 @@ def run_pass(conn, *, now=None, limit=500, shortlist_limit=DEFAULT_SHORTLIST_LIM
     failed = []
     # Les tables du Vault ne changent pas pendant la passe : une seule vue (caches).
     view = VaultView(conn, moment)
+    debounced = 0
+    kept = []
+    for event in events:
+        if _debounced(conn, event, moment, debounce_minutes):
+            debounced += 1
+        else:
+            kept.append(event)
+    events = kept
     for event in events:
         by_type[event["event_type"]] += 1
         try:
@@ -1192,6 +1211,7 @@ def run_pass(conn, *, now=None, limit=500, shortlist_limit=DEFAULT_SHORTLIST_LIM
             "processed": len(events) - len(failed),
             "failed": failed,
             "by_type": dict(sorted(by_type.items())),
+            "debounced": debounced,
         },
         "candidates": dict(sorted(outcomes.items())),
         "shortlisted_now": shortlisted_now,
@@ -1376,10 +1396,23 @@ def render_report(report, *, mode, db_label, max_watching=8):
     for candidate in report["rejected"]:
         lines.extend(_fmt_candidate(candidate))
     lines.append("")
-    lines.append(
-        "Phase suivante non branchee : shortlist -> Qwen -> Agency Agents -> "
-        "suggestion SUG-xxxx -> decision humaine. Aucun appel LLM, cloud ou Notion."
-    )
+    review = report.get("review")
+    if review is None:
+        lines.append(
+            "Revue Qwen + Agency non lancee (option --with-agents). Aucun appel LLM, "
+            "cloud ou Notion dans la passe.")
+    else:
+        lines.append(f"REVUE QWEN + AGENCY (mode C) : {len(review)} candidat(s)")
+        for item in review:
+            lines.append(f"    {item['candidate_id']} -> {item['result']}"
+                         + (f" {item.get('suggestion_id')}" if item.get("suggestion_id") else "")
+                         + (f" ({item['reason']})" if item.get("reason") else ""))
+            for agent in item.get("agents") or []:
+                if agent.get("value_score") is not None:
+                    lines.append(f"        {agent['agent']} : {agent['value_score']}/5 "
+                                 f"{agent.get('verdict')} - objection : "
+                                 f"{agent.get('main_objection') or 'aucune'}")
+        lines.append("Aucun appel cloud. Aucune action externe : la decision reste a Rosy.")
     return "\n".join(lines)
 
 
@@ -1403,6 +1436,11 @@ def main(argv=None):
     parser.add_argument("--limit", type=int, default=500, help="evenements max par passe")
     parser.add_argument("--shortlist", type=int, default=DEFAULT_SHORTLIST_LIMIT)
     parser.add_argument("--now", help="date de reference ISO (tests, rejeu)")
+    parser.add_argument("--with-agents", action="store_true",
+                        help="revue de la shortlist par Qwen + Agency Agents (lourd)")
+    parser.add_argument("--review-limit", type=int, default=2)
+    parser.add_argument("--debounce", type=int, default=None,
+                        help="minutes d'attente apres ingestion (defaut : 10 en --confirm)")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -1444,10 +1482,17 @@ def main(argv=None):
         mode, label = "dry-run", str(Path(args.db).resolve())
 
     try:
+        debounce = args.debounce if args.debounce is not None else (
+            DEFAULT_DEBOUNCE_MINUTES if mode == "confirm" else 0)
         report = run_pass(
             conn, now=now, limit=args.limit, shortlist_limit=args.shortlist,
-            scan=not args.no_scan,
+            scan=not args.no_scan, debounce_minutes=debounce,
         )
+        if args.with_agents:
+            import mentor_council
+
+            report["review"] = mentor_council.review_shortlist(
+                conn, mentor_council.OllamaBackend(), now=now, limit=args.review_limit)
     finally:
         conn.close()
 
