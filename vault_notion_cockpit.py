@@ -145,8 +145,12 @@ def build_projection(conn):
     signal_queue = intelligence_signals.collect_signals(conn, limit=500)
     signals_by_key = {item["key"]: item for item in signal_queue["items"]}
 
+    review_only = []
     for signal in signal_queue["items"]:
         if signal["priority"] > 2 or signal["key"] in mapped_by_signal:
+            continue
+        if signal["kind"] in intelligence_signals.REVIEW_ONLY_KINDS:
+            review_only.append(signal)
             continue
         rows.append(
             {
@@ -159,6 +163,28 @@ def build_projection(conn):
                 "next_step": signal["suggested_action"],
                 "verification": signal.get("verification_status") or "n/a",
                 "source": signal.get("source_url"),
+            }
+        )
+
+    if review_only:
+        # Une seule carte recapitulative, mise a jour sur place : la file
+        # detaillee reste interne (vault.db, API /intelligence/signals).
+        sources = sorted({s["source_id"] for s in review_only if s.get("source_id")})
+        rows.append(
+            {
+                "vault_ref": "review:sensitive_claim_review",
+                "item": f"🔎 Claims sensibles à vérifier ({len(review_only)})",
+                "kind": "Signal",
+                "attention": "🕒 Plus tard",
+                "priority": 3,
+                "why": (
+                    f"{len(review_only)} affirmations sensibles (santé, finance, droit) "
+                    f"en needs_review, issues de {len(sources)} source(s). "
+                    "File de review interne : aucune vérification automatique."
+                ),
+                "next_step": "Consulter la file de review du Vault quand tu le souhaites.",
+                "verification": "unverified",
+                "source": None,
             }
         )
 

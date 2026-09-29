@@ -1052,6 +1052,13 @@ def reassess(source_ids=None, limit=None, confirm=False, force=False):
                 "agency_run_1": (consensus or {}).get("agency_run_1"),
                 "agency_run_2": (consensus or {}).get("agency_run_2"),
             }
+            # Analyse DEGRADEE (Qwen local n'a pas repondu : heuristique seule) :
+            # elle ne prouve rien. On ne touche ni a la file de review, ni a la
+            # trace, ni au consensus ; la source reste a re-evaluer.
+            if analysis["qwen"] is None:
+                item["decision"] = "degraded"
+                items.append(item)
+                continue
             items.append(item)
             if not confirm:
                 continue
@@ -1061,6 +1068,19 @@ def reassess(source_ids=None, limit=None, confirm=False, force=False):
                 mentor_review.enqueue(
                     conn, row, analysis,
                     reason="v2_backfill:" + (analysis["review_reason"] or "review"),
+                )
+            else:
+                # Re-evaluation qui ne releve plus de la review (ex. timeout
+                # rejoue) : l'entree v2_backfill est marquee resolue, jamais
+                # supprimee ; une review d'une autre origine reste intacte.
+                conn.execute(
+                    """
+                    UPDATE intelligence_mentor_review_queue
+                       SET status = 'resolved_by_v2_reassess', updated_at = ?
+                     WHERE source_id = ? AND status = 'review_required'
+                       AND reason LIKE 'v2_backfill:%'
+                    """,
+                    (utcnow(), row["source_id"]),
                 )
             conn.execute(
                 """

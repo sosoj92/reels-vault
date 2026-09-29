@@ -323,12 +323,16 @@ def propose_priority_actions(conn, *, max_priority=2):
     ensure_schema(conn)
 
     queue = signals.collect_signals(conn, limit=500)
-    created = existing = unsupported = skipped_priority = 0
+    created = existing = unsupported = skipped_priority = review_only = 0
     items = []
 
     for signal in queue["items"]:
         if signal["priority"] > max_priority:
             skipped_priority += 1
+            continue
+        if signal["kind"] in signals.REVIEW_ONLY_KINDS:
+            # Review interne : pas d'action automatique (ni carte cockpit).
+            review_only += 1
             continue
 
         result = propose_signal_action(conn, signal)
@@ -346,6 +350,7 @@ def propose_priority_actions(conn, *, max_priority=2):
         "existing": existing,
         "unsupported": unsupported,
         "skipped_priority": skipped_priority,
+        "review_only": review_only,
         "items": items,
     }
 

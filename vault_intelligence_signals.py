@@ -28,6 +28,12 @@ class IntelligenceSignalError(ValueError):
 
 OPEN_ACTION_STATUSES = ("proposed", "approved", "todo", "doing")
 
+# Signaux de REVIEW INTERNE : toujours calcules (file consultable, claims
+# conserves en needs_review dans vault.db) mais jamais transformes
+# automatiquement en action ni en carte individuelle du cockpit Notion.
+# Le cockpit n'en affiche qu'un recapitulatif unique.
+REVIEW_ONLY_KINDS = frozenset({"sensitive_claim_review"})
+
 
 def _table_exists(conn, table):
     return conn.execute(

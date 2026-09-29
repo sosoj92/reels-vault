@@ -289,6 +289,47 @@ class ReassessExistingSourcesTests(unittest.TestCase):
         again = self.reassess(agency(variant=2), confirm=True)
         self.assertEqual(again["reassessed"], 0)
 
+    def test_replay_resolves_v2_backfill_review_without_deleting(self):
+        # 1er passage : second avis en echec (timeout) -> review.
+        self.reassess(None, confirm=True)
+        # Rejeu : les deux avis concordent -> plus de review.
+        result = self.reassess(agency(relevance=0.72, confidence=0.78, variant=2),
+                               source_ids=[self.source_id], confirm=True, force=True)
+        self.assertNotEqual(result["items"][0]["decision"], "review")
+        conn = sqlite3.connect(self.path)
+        try:
+            rows = conn.execute(
+                "SELECT status, reason FROM intelligence_mentor_review_queue").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(len(rows), 1)  # conservee, pas supprimee
+        self.assertEqual(rows[0][0], "resolved_by_v2_reassess")
+        self.assertIn("second_run_failed", rows[0][1])
+
+    def test_degraded_replay_never_resolves_review(self):
+        self.reassess(None, confirm=True)  # review (second avis en echec)
+        conn = sqlite3.connect(self.path)
+        try:
+            before = (conn.execute("SELECT * FROM intelligence_mentor_review_queue").fetchall(),
+                      conn.execute("SELECT * FROM intelligence_mentor_v2_reassessment").fetchall(),
+                      conn.execute("SELECT * FROM intelligence_mentor_consensus").fetchall())
+        finally:
+            conn.close()
+        # Rejeu ou Qwen ne repond pas : analyse heuristique seule.
+        with mock.patch.object(mentor_worker, "qwen_analyze", return_value=None):
+            result = self.reassess(agency(variant=2), source_ids=[self.source_id],
+                                   confirm=True, force=True)
+        self.assertEqual(result["items"][0]["decision"], "degraded")
+        conn = sqlite3.connect(self.path)
+        try:
+            after = (conn.execute("SELECT * FROM intelligence_mentor_review_queue").fetchall(),
+                     conn.execute("SELECT * FROM intelligence_mentor_v2_reassessment").fetchall(),
+                     conn.execute("SELECT * FROM intelligence_mentor_consensus").fetchall())
+        finally:
+            conn.close()
+        self.assertEqual(after, before)
+        self.assertEqual(after[0][0][3], "review_required")
+
     def test_reassess_refused_on_locked_real_vault(self):
         import v2_guard
         with mock.patch.object(v2_guard, "REAL_DB", self.path), \
