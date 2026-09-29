@@ -24,7 +24,7 @@ INTELLIGENCE_SCHEMA_VERSION = 1
 
 ATTENTION_STATUSES = ("now", "later", "in_place", "dismissed")
 VERIFICATION_STATUSES = ("asserted", "unverified", "verified", "contested")
-SOURCE_ROLES = ("mentions", "describes", "recommends", "criticizes", "primary")
+SOURCE_ROLES = ("mentions", "describes", "recommends", "criticizes", "primary", "relevant_to")
 
 INTELLIGENCE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS intelligence_entities (

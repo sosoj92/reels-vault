@@ -92,6 +92,13 @@ PROJECTABLE_SUGGESTION_STATUSES = (
 )
 
 CONSULTATION_MODES = ("A", "B", "C")
+# Definition de Rosy (2026-09-29). Stockee seulement : aucun mode n'est encore execute.
+CONSULTATION_MODE_DESCRIPTIONS = {
+    "A": "Agent explicitement nomme par Rosy.",
+    "B": "Agent(s) choisi(s) automatiquement pour repondre a une question de Rosy.",
+    "C": "Agent(s) choisi(s) par le Mentor pour evaluer proactivement un candidat "
+         "avant suggestion.",
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mentor_events (

@@ -105,3 +105,34 @@ Déverrouillage, après validation : créer `mentor_proactive.enabled` à la rac
 verticales, clients, prospects) n'ont aucune source liée ; les convergences réelles portent sur des outils
 (GitHub 7 sources, Claude 6, ChatGPT 5…) et restent en observation (`no_project_anchor`).
 Le canal proactif ne produira de suggestions de projet qu'une fois les sources rattachées aux projets.
+
+## Phase intermédiaire — propositions de rattachement source → projet (`mentor_project_links.py`)
+
+Réutilise les projets (`intelligence_entities` + `intelligence_entity_bindings`) et le lien réel
+existant `intelligence_entity_sources` (nouveau rôle `relevant_to`, créé **seulement** après validation).
+`intelligence_resolution_candidates` n'est pas détournée (identité entité ↔ entité).
+Table additive : `mentor_project_link_proposals` (`PL-0001`…, confiance, niveau, raison, preuves JSON,
+empreinte unique, une seule proposition ouverte par paire source/projet, statuts
+proposed/approved/rejected/superseded, `reviewed_at`). Créée seulement par `--review`.
+
+Profils de projet traçables : chaque terme porte sa provenance (nom du projet, exemple de Rosy,
+synonyme, déduit à valider). Les synonymes d'une même idée forment un **concept** et ne s'additionnent pas.
+
+| Niveau | Règle |
+|---|---|
+| HIGH | nom du projet / client / prospect cité ; ou ≥ 3 signaux indépendants (concepts + classement + proximité) et confiance ≥ 0,80 |
+| MEDIUM | ≥ 2 concepts du projet + un élément de contexte (ou un 3ᵉ concept), confiance ≥ 0,55, pas de concurrent proche |
+| LOW | un seul concept, contexte seul, résumé IA seul, source sensible sans nom, parent couvert par un enfant nommé |
+| AMBIGUOUS | alias partagé (« Nexdoor »), ou deux projets non liés à moins de 0,15 d'écart |
+
+Outils et thèmes transversaux (ChatGPT, Claude, IA, automatisation, agents…) ne comptent jamais.
+LOW/AMBIGUOUS ne sont jamais appliqués ; HIGH non plus sans validation humaine.
+
+```powershell
+.\.venv\Scripts\python.exe mentor_project_links.py --dry-run --show 20
+.\.venv\Scripts\python.exe mentor_project_links.py --review   # plus tard : sauvegarde, puis [1] approuver [2] refuser [3] passer
+```
+
+Modes de consultation Agency (stockés, non exécutés) : A = agent nommé par Rosy ;
+B = agents choisis automatiquement pour une question de Rosy ; C = agents choisis par le Mentor
+pour évaluer un candidat avant suggestion.
