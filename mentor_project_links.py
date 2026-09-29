@@ -44,7 +44,7 @@ import mentor_proactive_store as pstore
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "vault.db"
-RULES_VERSION = "project-links-v2"
+RULES_VERSION = "project-links-v3"
 LINK_ROLE = "relevant_to"
 
 LEVELS = ("high", "medium", "low", "ambiguous")
@@ -190,7 +190,18 @@ def _compile_profile(entity, stored):
     names = {fold(entity["name"]): "nom du projet"}
     for name in stored.get("named_entities", []):
         names.setdefault(fold(name), "entite nommee du profil")
+    rules = []
+    for rule in stored.get("compound_rules", []):
+        rules.append({
+            "name": rule["name"], "level": rule["level"], "context_min": rule["context_min"],
+            "primary": concepts(rule["primary_any"], "core"),
+            "context": concepts(rule["context_any"], "context"),
+        })
     return {
+        "rules": rules,
+        "defer": [e["project"] for e in stored.get("excluded_topics", [])
+                  if e["mode"] == "defer"],
+        "active": bool(stored.get("active", 1)),
         "names": names,
         "core": concepts(stored.get("core_topics"), "core")
         + concepts(stored.get("specific_tools"), "tool"),
@@ -366,6 +377,52 @@ def hit_order(hit):
     return hit["concept"]["topic"]
 
 
+def _first_hit(concept, fields):
+    for term in sorted(concept["terms"], key=len, reverse=True):
+        found = _find(term, fields)
+        if found:
+            return term, found
+    return None
+
+
+def _evaluate_rule(rule, primary, second_hand, classification):
+    """Regle composee (donnee du profil) : un sujet principal + N contextes distincts."""
+    main = None
+    for concept in rule["primary"]:
+        hit = _first_hit(concept, {**primary, **second_hand})
+        if hit:
+            main = {"topic": concept["topic"], "term": hit[0], "fields": hit[1]}
+            break
+    if main is None:
+        return None
+    # Contextes DISTINCTS : un contexte dont toutes les occurrences sont incluses
+    # dans celles d'un autre (« leads » dans « generation de leads ») ne compte pas.
+    fields = {**primary, **second_hand, **classification}
+    hits = []
+    for concept in rule["context"]:
+        for term in sorted(concept["terms"], key=len, reverse=True):
+            spans = _spans(term, fields)
+            if spans:
+                hits.append((concept["topic"], term, spans))
+                break
+    hits.sort(key=lambda h: -max(e - b for b, e, _ in h[2].values()))
+    contexts, taken = [], []
+    for topic, term, spans in hits:
+        inside = all(
+            any(f == tf and tb <= b and e <= te for tf, tb, te in taken)
+            for f, (b, e, _) in spans.items()
+        )
+        if inside:
+            continue
+        contexts.append({"topic": topic, "term": term,
+                         "fields": {f: span[2] for f, span in spans.items()}})
+        taken.extend((f, b, e) for f, (b, e, _) in spans.items())
+    if len(contexts) < rule["context_min"]:
+        return None
+    return {"kind": "compound_rule", "rule": rule["name"], "level": rule["level"],
+            "main": main, "contexts": contexts, "weight": 0.0}
+
+
 def _signals_for(project, source, *, proximity):
     profile = project["profile"]
     fields = source["fields"]
@@ -410,6 +467,11 @@ def _signals_for(project, source, *, proximity):
     if project["attention_status"] == "now" and signals:
         signals.append({"kind": "active", "weight": WEIGHTS["active"]})
 
+    for rule in profile["rules"]:
+        hit = _evaluate_rule(rule, primary, second_hand, classification)
+        if hit:
+            signals.append(hit)
+
     blocked = []
     for term in profile["block"]:
         found = _find(term, {**primary, **second_hand})
@@ -420,6 +482,10 @@ def _signals_for(project, source, *, proximity):
 
 def _level(project, signals, *, sensitive, blocked):
     if not signals:
+        return None, 0.0, None
+    rule_hits = [s for s in signals if s["kind"] == "compound_rule"]
+    signals = [s for s in signals if s["kind"] != "compound_rule"]
+    if not signals and not rule_hits:
         return None, 0.0, None
     kinds = [s["kind"] for s in signals]
     confidence = _noisy_or(s["weight"] for s in signals)
@@ -439,6 +505,14 @@ def _level(project, signals, *, sensitive, blocked):
         return "low", confidence, "source sensible (sante/finance/droit) sans mention explicite du projet"
     if project["entity_type"] in NAME_ONLY_TYPES:
         return "low", confidence, "un client/prospect se designe par son nom"
+    if rule_hits:
+        rule = rule_hits[0]
+        contexts = ", ".join(c["topic"] for c in rule["contexts"])
+        reason = (f"regle composee '{rule['rule']}' : {rule['main']['topic']} + "
+                  f"contextes metier ({contexts})")
+        if sensitive:
+            reason += " (source sensible : verifier qu'il ne s'agit pas de sante personnelle)"
+        return rule["level"], max(confidence, MEDIUM_MIN), reason
     # Un troisieme sujet distinct vaut element de contexte.
     if concept_count >= 2 and strong >= 1 and (support or concept_count >= 3):
         independent = len({k for k in kinds if k in ("core", "tool", "classification",
@@ -487,6 +561,8 @@ def analyze(conn):
             signals, blocked = _signals_for(project, source, proximity=proximity)
             level, confidence, reason = _level(project, signals, sensitive=sensitive,
                                                blocked=blocked)
+            if not project["profile"]["active"] and level in ("high", "medium"):
+                level, reason = "low", "projet marque inactif dans son profil"
             if level is None:
                 continue
             candidates.append({
@@ -514,10 +590,33 @@ def analyze(conn):
                     "blocked": [], "competitors": ids,
                 })
 
+        _apply_defer(candidates, projects, sid, linked)
         _resolve_competition(candidates, projects)
         source["sensitive"] = sensitive
         results.append({"source": source, "candidates": candidates})
     return {"projects": projects, "results": results}
+
+
+def _apply_defer(candidates, projects, source_id, linked):
+    """
+    Exclusion `defer` (donnee du profil) : si la source est deja clairement
+    rattachee a un autre projet designe (lien reel, HIGH ou MEDIUM), ce projet s'efface.
+    """
+    by_key = {p["canonical_key"]: pid for pid, p in projects.items()}
+    strong = {c["entity_id"] for c in candidates if c["level"] in ("high", "medium")}
+    for cand in candidates:
+        project = projects.get(cand["entity_id"])
+        if not project or cand["level"] not in ("high", "medium"):
+            continue
+        for key in project["profile"]["defer"]:
+            other = by_key.get(key)
+            if other is None or other == cand["entity_id"]:
+                continue
+            if other in strong or source_id in linked.get(other, set()):
+                cand["level"] = "low"
+                cand["reason"] = (f"s'efface : source deja clairement rattachee a "
+                                  f"{projects[other]['name']}")
+                break
 
 
 def _resolve_competition(candidates, projects):
@@ -572,6 +671,14 @@ PROVENANCE_LABELS = {
 def explain(candidate):
     lines = []
     for signal in candidate["signals"]:
+        if signal["kind"] == "compound_rule":
+            contexts = "; ".join(
+                f"{c['topic']} (dans {', '.join(c['fields'])})" for c in signal["contexts"])
+            lines.append(
+                f"regle composee '{signal['rule']}' du profil : sujet principal "
+                f"'{signal['main']['topic']}' (mot '{signal['main']['term']}') + contextes "
+                f"metier : {contexts}")
+            continue
         label = SIGNAL_LABELS[signal["kind"]]
         if signal["kind"] == "proximity":
             lines.append(f"{label} : source {signal['source_id']} "
@@ -604,7 +711,8 @@ def ensure_schema(conn):
 
 def _fingerprint(candidate):
     signature = sorted(
-        (s["kind"], s.get("term") or str(s.get("source_id") or "")) for s in candidate["signals"]
+        (s["kind"], s.get("term") or s.get("rule") or str(s.get("source_id") or ""))
+        for s in candidate["signals"]
     )
     return pstore.sha256(json.dumps(
         [RULES_VERSION, candidate["source_id"], candidate["entity_id"],

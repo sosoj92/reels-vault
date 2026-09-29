@@ -35,8 +35,16 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "vault.db"
 
 LIST_FIELDS = ("core_topics", "context_topics", "named_entities", "specific_tools",
-               "excluded_topics")
-EXCLUSION_MODES = ("alone_insufficient", "block")
+               "excluded_topics", "compound_rules", "advisors")
+EXCLUSION_MODES = ("alone_insufficient", "block", "defer")
+RULE_LEVELS = ("medium",)
+
+# Colonnes ajoutees apres la creation de la table (migration additive, idempotente).
+EXTRA_COLUMNS = (
+    ("compound_rules", "TEXT NOT NULL DEFAULT '[]'"),
+    ("advisors", "TEXT NOT NULL DEFAULT '[]'"),
+    ("active", "INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))"),
+)
 PROFILE_STATUSES = ("complete", "incomplete")
 
 SCHEMA = """
@@ -66,6 +74,10 @@ class ProfileError(ValueError):
 
 def ensure_schema(conn):
     conn.executescript(SCHEMA)
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(mentor_project_profiles)")}
+    for name, declaration in EXTRA_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE mentor_project_profiles ADD COLUMN {name} {declaration}")
     conn.commit()
 
 
@@ -91,16 +103,53 @@ def _normalize_topics(items, default_provenance):
 
 
 def _normalize_exclusions(items):
+    """
+    alone_insufficient : le terme ne compte jamais comme sujet du projet ;
+    block             : sa presence empeche toute proposition (hors mention explicite) ;
+    defer             : {"project": canonical_key} - si la source est deja clairement
+                        rattachee a ce projet (lien reel, HIGH ou MEDIUM), ce projet-ci s'efface.
+    """
     result = []
     for item in items or []:
         if isinstance(item, str):
             item = {"term": item}
         mode = item.get("mode") or "alone_insufficient"
-        if mode not in EXCLUSION_MODES or not str(item.get("term") or "").strip():
+        if mode not in EXCLUSION_MODES:
+            raise ProfileError(f"exclusion invalide : {item!r}")
+        if mode == "defer":
+            if not str(item.get("project") or "").strip():
+                raise ProfileError(f"exclusion defer sans projet : {item!r}")
+            result.append({"mode": mode, "project": item["project"].strip(),
+                           "note": item.get("note")})
+            continue
+        if not str(item.get("term") or "").strip():
             raise ProfileError(f"exclusion invalide : {item!r}")
         result.append({"term": item["term"].strip(), "mode": mode,
                        "note": item.get("note")})
     return result
+
+
+def _normalize_rules(items, default_provenance):
+    """
+    Regle composee : un sujet principal (au moins un de `primary_any`) plus au moins
+    `context_min` contextes metier DISTINCTS parmi `context_any` -> niveau `level`.
+    La mecanique est generique (mentor_project_links) ; le contenu est une donnee.
+    """
+    rules = []
+    for item in items or []:
+        if not isinstance(item, dict) or not item.get("name"):
+            raise ProfileError(f"regle composee invalide : {item!r}")
+        level = item.get("level") or "medium"
+        if level not in RULE_LEVELS:
+            raise ProfileError(f"niveau de regle non autorise : {level!r}")
+        context_min = int(item.get("context_min") or 2)
+        primary = _normalize_topics(item.get("primary_any"), default_provenance)
+        context = _normalize_topics(item.get("context_any"), default_provenance)
+        if not primary or len(context) < context_min or context_min < 1:
+            raise ProfileError(f"regle composee incomplete : {item.get('name')!r}")
+        rules.append({"name": item["name"], "primary_any": primary, "context_any": context,
+                      "context_min": context_min, "level": level, "note": item.get("note")})
+    return rules
 
 
 def normalize(profile):
@@ -113,6 +162,9 @@ def normalize(profile):
         "named_entities": [str(n).strip() for n in profile.get("named_entities") or []
                            if str(n).strip()],
         "excluded_topics": _normalize_exclusions(profile.get("excluded_topics")),
+        "compound_rules": _normalize_rules(profile.get("compound_rules"), source),
+        "advisors": [str(a).strip() for a in profile.get("advisors") or [] if str(a).strip()],
+        "active": 0 if profile.get("active") in (False, 0, "0") else 1,
         "profile_source": source,
         "notes": profile.get("notes"),
     }
@@ -141,26 +193,25 @@ def upsert_profile(conn, entity_id, profile, *, overwrite=True, at=None):
     ).fetchone()
     if existing and not overwrite:
         return "kept"
-    values = (
+    columns = ["project_name", "description", *LIST_FIELDS, "active", "profile_status",
+               "profile_source", "notes"]
+    values = [
         entity[1], data["description"],
         *(pstore.dumps(data[field]) for field in LIST_FIELDS),
-        data["profile_status"], data["profile_source"], data["notes"],
-    )
+        data["active"], data["profile_status"], data["profile_source"], data["notes"],
+    ]
     if existing:
         conn.execute(
-            "UPDATE mentor_project_profiles SET project_name = ?, description = ?, "
-            "core_topics = ?, context_topics = ?, named_entities = ?, specific_tools = ?, "
-            "excluded_topics = ?, profile_status = ?, profile_source = ?, notes = ?, "
-            "updated_at = ? WHERE entity_id = ?",
+            "UPDATE mentor_project_profiles SET "
+            + ", ".join(f"{c} = ?" for c in columns)
+            + ", updated_at = ? WHERE entity_id = ?",
             (*values, at, entity_id),
         )
         outcome = "updated"
     else:
         conn.execute(
-            "INSERT INTO mentor_project_profiles (project_name, description, core_topics, "
-            "context_topics, named_entities, specific_tools, excluded_topics, profile_status, "
-            "profile_source, notes, entity_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO mentor_project_profiles ({', '.join(columns)}, entity_id, "
+            f"created_at, updated_at) VALUES ({', '.join('?' for _ in columns)}, ?, ?, ?)",
             (*values, entity_id, at, at),
         )
         outcome = "created"
@@ -171,6 +222,21 @@ def upsert_profile(conn, entity_id, profile, *, overwrite=True, at=None):
 def get_profile(conn, entity_id):
     if not schema_present(conn):
         return None
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(mentor_project_profiles)")}
+    if any(name not in columns for name, _ in EXTRA_COLUMNS):
+        # Base plus ancienne en lecture (dry-run) : valeurs par defaut.
+        row = conn.execute(
+            "SELECT * FROM mentor_project_profiles WHERE entity_id = ?", (entity_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item.setdefault("compound_rules", "[]")
+        item.setdefault("advisors", "[]")
+        item.setdefault("active", 1)
+        for field in LIST_FIELDS:
+            item[field] = pstore.loads(item[field], [])
+        return item
     row = conn.execute(
         "SELECT * FROM mentor_project_profiles WHERE entity_id = ?", (entity_id,)
     ).fetchone()

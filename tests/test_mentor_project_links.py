@@ -36,6 +36,7 @@ PROJECTS = (
      "activity:nexdoor_partners"),
     ("client", "client:nexdoor_partners:logistique:halidi_transport_international",
      "Halidi Transport International", "vertical:nexdoor_partners:logistique"),
+    ("activity", "activity:side_businesses", "Side businesses / opportunités", None),
 )
 
 
@@ -490,6 +491,90 @@ class DecisionTests(unittest.TestCase):
             links.record_decision(self.conn, source_id=9999, entity_id=self.talent,
                                   decision="approve", level="medium", confidence=0.6,
                                   reason="x")
+
+
+class CompoundRuleAndSideBusinessTests(unittest.TestCase):
+    def setUp(self):
+        _isolation.verifier()
+        self.vault = Vault()
+        self.conn = self.vault.conn
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_partners_compound_rule_gives_medium_with_two_business_contexts(self):
+        sid = self.vault.source(
+            "Automatiser la generation de leads",
+            "Un workflow qui qualifie les leads, remplit le CRM et envoie les emails.")
+        cand = self.vault.candidates(sid)["Nexdoor Partners"]
+        self.assertEqual(cand["level"], "medium")
+        self.assertIn("regle composee 'automatisation metier'", cand["reason"])
+        rule = [s for s in cand["signals"] if s["kind"] == "compound_rule"][0]
+        self.assertGreaterEqual(len(rule["contexts"]), 2)
+        self.assertIn("regle composee", "\n".join(links.explain(cand)))
+
+    def test_compound_rule_needs_two_distinct_contexts(self):
+        sid = self.vault.source("Automatiser ses emails", "automation des emails")
+        cand = self.vault.candidates(sid)["Nexdoor Partners"]
+        self.assertEqual(cand["level"], "low")
+
+    def test_compound_rule_lives_in_profile_data(self):
+        partners = self.vault.project("nexdoor_partners")
+        stored = profiles.get_profile(self.conn, partners)
+        self.assertEqual(stored["compound_rules"][0]["name"], "automatisation metier")
+        sid = self.vault.source("Automatiser ses relances",
+                                "relance automatique des leads par emails")
+        self.assertEqual(self.vault.candidates(sid)["Nexdoor Partners"]["level"], "medium")
+        stored["compound_rules"] = []
+        profiles.upsert_profile(self.conn, partners, stored)
+        self.assertNotEqual(self.vault.candidates(sid)["Nexdoor Partners"]["level"], "medium")
+
+    def test_side_business_needs_its_own_topics_and_is_never_a_fallback(self):
+        unclassified = self.vault.source("Une video sans rapport", "recette de cuisine")
+        self.assertEqual(self.vault.candidates(unclassified), {})
+        sid = self.vault.source(
+            "Lancer un micro-SaaS en 30 jours",
+            "Trouver une niche, valider le marche avec un MVP, pricing et business model.")
+        cand = self.vault.candidates(sid)["Side businesses / opportunités"]
+        self.assertIn(cand["level"], ("medium", "high"))
+
+    def test_side_business_defers_to_partners(self):
+        sid = self.vault.source(
+            "Nouveau service : automatiser la generation de leads",
+            "business model du nouveau service : workflow, leads, CRM, emails, pricing")
+        found = self.vault.candidates(sid)
+        self.assertEqual(found["Nexdoor Partners"]["level"], "medium")
+        self.assertEqual(found["Side businesses / opportunités"]["level"], "low")
+        self.assertIn("s'efface", found["Side businesses / opportunités"]["reason"])
+
+    def test_personal_development_is_blocked_for_side_business(self):
+        sid = self.vault.source("Motivation : lancer un side hustle",
+                                "developpement personnel, monetisation, niche, MVP")
+        cand = self.vault.candidates(sid)["Side businesses / opportunités"]
+        self.assertEqual(cand["level"], "low")
+        self.assertIn("anti-signal", cand["reason"])
+
+    def test_old_profile_table_is_migrated_without_loss(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE intelligence_entities (id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute("INSERT INTO intelligence_entities VALUES (1, 'P')")
+        conn.execute(
+            "CREATE TABLE mentor_project_profiles (entity_id INTEGER PRIMARY KEY, "
+            "project_name TEXT NOT NULL, description TEXT, core_topics TEXT NOT NULL DEFAULT '[]', "
+            "context_topics TEXT NOT NULL DEFAULT '[]', named_entities TEXT NOT NULL DEFAULT '[]', "
+            "specific_tools TEXT NOT NULL DEFAULT '[]', excluded_topics TEXT NOT NULL DEFAULT '[]', "
+            "profile_status TEXT NOT NULL DEFAULT 'incomplete', profile_source TEXT NOT NULL, "
+            "notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO mentor_project_profiles (entity_id, project_name, description, "
+                     "profile_source, created_at, updated_at) VALUES (1, 'P', 'garde', 'x', 'a', 'a')")
+        self.assertEqual(profiles.get_profile(conn, 1)["advisors"], [])  # lecture avant migration
+        profiles.ensure_schema(conn)
+        profiles.ensure_schema(conn)
+        item = profiles.get_profile(conn, 1)
+        self.assertEqual((item["description"], item["active"], item["compound_rules"]),
+                         ("garde", 1, []))
+        conn.close()
 
 
 if __name__ == "__main__":

@@ -71,6 +71,7 @@ INITIAL_PROFILES = {
         ],
         "named_entities": ["Nexdoor Talent"],
         "specific_tools": ["Manatal"],
+        "advisors": ["Recruitment Specialist", "Growth Hacker", "Chief Financial Officer"],
         "excluded_topics": [
             {"term": t, "mode": "alone_insufficient", "note": "signal faible (Rosy)"}
             for t in ("emploi", "job", "linkedin", "ia", "automatisation")
@@ -121,6 +122,36 @@ INITIAL_PROFILES = {
             {"term": t, "mode": "alone_insufficient", "note": "signal faible (Rosy)"}
             for t in ("ia", "chatgpt", "claude")
         ],
+        "compound_rules": [{
+            "name": "automatisation metier",
+            "primary_any": [
+                {"topic": "automatisation", "terms": ["automatisation", "automatisations",
+                                                      "automatiser", "automation"]},
+                {"topic": "workflow", "terms": ["workflow", "workflows"]},
+                {"topic": "digitalisation", "terms": ["digitalisation", "digitaliser"]},
+            ],
+            "context_any": [
+                {"topic": "leads", "terms": ["leads", "lead"]},
+                {"topic": "generation de leads", "terms": ["generation de leads",
+                                                           "lead generation"]},
+                "CRM",
+                {"topic": "email", "terms": ["email", "emails", "e-mail", "e-mails"]},
+                {"topic": "qualification", "terms": ["qualification", "qualifier"]},
+                {"topic": "formulaire", "terms": ["formulaire", "formulaires"]},
+                {"topic": "prise de rendez-vous", "terms": ["prise de rendez-vous",
+                                                            "prise de rdv"]},
+                "prospection",
+                {"topic": "client", "terms": ["client", "clients"]},
+                {"topic": "chatbot", "terms": ["chatbot", "chatbots"]},
+                {"topic": "integration", "terms": ["integration", "integrations"]},
+                "API",
+                "conversion",
+            ],
+            "context_min": 2,
+            "level": "medium",
+            "note": "Regle de Rosy du 2026-09-30.",
+        }],
+        "advisors": ["Workflow Architect", "Outbound Strategist", "Growth Hacker"],
         "profile_source": "rosy",
         "notes": VARIANTS_NOTE + " WordPress, Elementor, Make, Zapier : places en outils "
                  "specifiques uniquement (evite le double comptage sujet + outil). "
@@ -153,6 +184,7 @@ INITIAL_PROFILES = {
         ],
         "named_entities": ["Recherche emploi remote"],
         "specific_tools": [],
+        "advisors": ["Recruitment Specialist", "Chief of Staff", "Chief Financial Officer"],
         "excluded_topics": [
             {"term": "job", "mode": "alone_insufficient", "note": "souvent dans un autre sens"},
             {"term": "certification", "mode": "alone_insufficient", "note": "Rosy"},
@@ -186,6 +218,8 @@ INITIAL_PROFILES = {
         ],
         "named_entities": ["Verticale Neuropsychologues"],
         "specific_tools": [],
+        "advisors": ["Healthcare Innovation Strategist", "Workflow Architect",
+                     "Growth Hacker"],
         "excluded_topics": PERSONAL_HEALTH_BLOCK,
         "profile_source": "rosy (NEUROPSYCHOLOGUES / NEUROSOLUTIONS)",
         "notes": VARIANTS_NOTE + " Profil commun fourni pour la verticale et NeuroSolutions.",
@@ -193,6 +227,7 @@ INITIAL_PROFILES = {
     "prospect:nexdoor_partners:neuropsychologues:neurosolutions_center": {
         "description": NEURO_DESCRIPTION,
         "named_entities": ["NeuroSolutions", "NeuroSolutions Center"],
+        "advisors": ["Healthcare Innovation Strategist", "Workflow Architect"],
         "excluded_topics": PERSONAL_HEALTH_BLOCK,
         "profile_status": "complete",
         "profile_source": "rosy (NEUROPSYCHOLOGUES / NEUROSOLUTIONS)",
@@ -219,6 +254,7 @@ INITIAL_PROFILES = {
         ],
         "named_entities": ["Verticale Logistique"],
         "specific_tools": [],
+        "advisors": ["Workflow Architect", "Operations Manager", "Outbound Strategist"],
         "excluded_topics": [],
         "profile_source": "rosy (HALIDI / LOGISTIQUE) - applique a la verticale, a confirmer",
         "notes": VARIANTS_NOTE + " Sujets logistiques portes par la verticale ; Halidi "
@@ -228,24 +264,68 @@ INITIAL_PROFILES = {
         "description": ("Projet de digitalisation d'une activite import/export/logistique avec "
                         "site, CRM, qualification des demandes et automatisations."),
         "named_entities": ["Halidi", "Halidi Transport", "Halidi Transport International"],
+        "advisors": ["Workflow Architect", "Operations Manager"],
         "profile_status": "complete",
         "profile_source": "rosy (HALIDI / LOGISTIQUE)",
         "notes": "Client : designe par son nom. Jamais sur de l'automatisation generique.",
     },
     "activity:side_businesses": {
-        "description": None,
-        "core_topics": [],
-        "named_entities": [],
-        "profile_status": "incomplete",
-        "profile_source": "migration (ancien profil code, nom du projet uniquement)",
-        "notes": "A completer par Rosy : description, sujets, noms, outils, exclusions. "
-                 "Les anciens termes devines (side business, side hustle) ne sont pas repris.",
+        "description": (
+            "Exploration d'idees de revenus, micro-business, produits, services ou "
+            "opportunites commerciales non encore rattaches a un projet principal."),
+        "core_topics": [
+            {"topic": "business idea", "terms": ["business idea", "business ideas",
+                                                 "idee de business", "idees de business"]},
+            {"topic": "side business", "terms": ["side business", "side businesses"]},
+            "side hustle",
+            {"topic": "opportunite commerciale", "terms": ["opportunite commerciale",
+                                                           "opportunites commerciales"]},
+            "monetisation",
+            {"topic": "nouveau service", "terms": ["nouveau service", "nouveaux services"]},
+            {"topic": "nouveau produit", "terms": ["nouveau produit", "nouveaux produits"]},
+            {"topic": "revenus complementaires", "terms": ["revenus complementaires",
+                                                          "revenu complementaire"]},
+            {"topic": "micro-SaaS", "terms": ["micro-saas", "micro saas", "microsaas"]},
+            {"topic": "business model", "terms": ["business model", "modele economique"]},
+        ],
+        "context_topics": [
+            "acquisition clients", "pricing",
+            {"topic": "marge", "terms": ["marge", "marges"]},
+            "recurring revenue", "marketplace", "niche", "lancement",
+            {"topic": "validation marche", "terms": ["validation marche",
+                                                     "valider le marche"]},
+            "MVP",
+        ],
+        "named_entities": ["Side businesses"],
+        "specific_tools": [],
+        "excluded_topics": [
+            {"term": "automatisation", "mode": "alone_insufficient",
+             "note": "automatisation seule (Rosy)"},
+            {"term": "prospection", "mode": "alone_insufficient",
+             "note": "prospection seule (Rosy)"},
+            {"term": "motivation", "mode": "block", "note": "developpement personnel (Rosy)"},
+            {"term": "developpement personnel", "mode": "block", "note": "Rosy"},
+            {"mode": "defer", "project": "activity:nexdoor_partners",
+             "note": "contenu deja clairement rattache a Nexdoor Partners (Rosy)"},
+            {"mode": "defer", "project": "activity:nexdoor_talent",
+             "note": "contenu deja clairement rattache a Nexdoor Talent (Rosy)"},
+        ],
+        "advisors": ["Product Manager", "Trend Researcher", "Chief Financial Officer"],
+        "profile_status": "complete",
+        "profile_source": "rosy",
+        "notes": VARIANTS_NOTE + " Jamais un fallback pour les sources non classees. "
+                 "Outils IA generiques : exclus par la regle generique. « Simple actualite "
+                 "business » : non detectable par mots-cles, couvert par l'exigence de "
+                 "2 sujets + contexte.",
     },
 }
 
 
-def seed(conn, *, force=False, dry_run=False):
-    """Cree les profils absents. Retourne {canonical_key: outcome}."""
+def seed(conn, *, force=False, dry_run=False, update=()):
+    """
+    Cree les profils absents. `update` = cles a remplacer explicitement par la
+    version fournie ici (decision de Rosy) ; les autres ne sont jamais ecrases.
+    """
     result = {}
     for key, profile in INITIAL_PROFILES.items():
         row = conn.execute(
@@ -258,7 +338,8 @@ def seed(conn, *, force=False, dry_run=False):
             exists = profiles.schema_present(conn) and profiles.get_profile(conn, row[0])
             result[key] = "exists" if exists else "would_create"
             continue
-        result[key] = profiles.upsert_profile(conn, row[0], profile, overwrite=force)
+        result[key] = profiles.upsert_profile(conn, row[0], profile,
+                                              overwrite=force or key in update)
     return result
 
 
@@ -268,12 +349,15 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true",
                         help="ecrase les profils existants (corrections perdues)")
+    parser.add_argument("--update", nargs="*", default=(),
+                        help="cles canoniques a remplacer par la version de ce fichier")
     args = parser.parse_args(argv)
     from vault_db import connect
 
     conn = connect(args.db)
     try:
-        for key, outcome in seed(conn, force=args.force, dry_run=args.dry_run).items():
+        for key, outcome in seed(conn, force=args.force, dry_run=args.dry_run,
+                                     update=tuple(args.update)).items():
             print(f"{outcome:<15} {key}")
     finally:
         conn.close()
