@@ -151,3 +151,44 @@ Les connaissances métier ne sont plus dans le code : table additive `mentor_pro
 - Règles génériques restées dans le code : termes universels (IA, ChatGPT, Claude…), un client/prospect se désigne par son nom,
   alias partagés dérivés des noms (« nexdoor »), plafond des sources sensibles (sauf projet qui déclare ses anti-signaux santé).
 - Décisions prises sur un dry-run : `record_decision()` (PL-0001 source 16 → Nexdoor Talent approuvée, PL-0002 source 12 → Recherche emploi remote refusée).
+
+## Clôture V3 : Qwen + Agency, livraison, Notion, Telegram
+
+### Règles composées et Side businesses (`project-links-v3`)
+- `compound_rules` (donnée du profil) : un sujet principal + N contextes métier **distincts** → MEDIUM.
+  Nexdoor Partners : automatisation / workflow / digitalisation + 2 contextes parmi leads, CRM, email, qualification…
+- Exclusion `defer` : Side businesses s'efface si la source est déjà clairement rattachée à Partners ou Talent ;
+  jamais de repli pour les sources non classées.
+- Colonnes ajoutées à `mentor_project_profiles` : `compound_rules`, `advisors` (conseillers Agency, éditables), `active`.
+
+### Conseil des agents — `mentor_council.py`
+- Sélection **déterministe** (max 3) : conseillers du profil du projet, puis regard du type de candidat, puis registre.
+  Modes A (agent nommé, alias CFO / Recruitment Agent…), B (question), C (évaluation proactive).
+- Qwen (Ollama local) rédige l'hypothèse, puis chaque agent rend un verdict JSON : `value_score` 0–5, `proposed_action`,
+  `main_objection`, `blocking_objection`, `confidence`, `evidence_refs` (filtrées sur les références réelles).
+- Règle de cohérence (petit modèle) : une objection n'est bloquante que si l'agent s'oppose ou note ≤ 2/5 avec une objection écrite.
+- Filtre : ≥ 1 agent à 4/5, aucune objection bloquante, projet actif, actionnable, fatigue < 2.
+- Qwen indisponible : le candidat attend (3 essais sur sortie invalide, puis expiration).
+- Mesure (i3-8130U, CPU) : ~3 min par candidat (hypothèse + 3 agents), d'où la revue au repos, 2 candidats par passage.
+
+### Livraison — `mentor_delivery.py`
+Réglages dans `meta` (`setting:mentor.*`) : 1 push/jour, push si score ≥ 0,75, digest à 18:30 pour ≥ 0,55,
+heures calmes 21:30–08:30, durée de vie 14 jours, pause. Snooze « ce soir / demain / lundi » écrit dans `vault.db`,
+réévalué avant renvoi (expiration silencieuse si plus pertinent). Retours 👎 → `mentor_feedback` → fatigue.
+
+### Notion
+Cockpit **existant** (data source 3dd87f7b…) : lignes `suggestion:SUG-xxxx`, `Kind = Suggestion`.
+Options ajoutées à la base existante : Décision « ⏰ Reporter », « 📌 Garder comme insight ».
+Décisions : ✅ Approuver → tâche (vault.db puis base Tâches existante) · 📌 insight · ⏰ report (demain 9h) · ⛔ Ignorer.
+
+### Telegram — `telegram_gateway.py`
+Polling local (aucun serveur exposé), offset persistant (`telegram_state`), contexte des messages (`telegram_messages`).
+Configuration : `python telegram_setup.py` (token masqué → `.env`, IDs détectés, message de test).
+
+### Schéma SQLite ajouté par la clôture
+- `mentor_notifications`, `mentor_feedback` (schéma proactif v2) ;
+- `telegram_state`, `telegram_messages` ;
+- colonnes `compound_rules`, `advisors`, `active` sur `mentor_project_profiles`.
+
+### Démarrage
+`setup_windows_tasks.ps1` enregistre « Reels Vault - Telegram Gateway » et « Reels Vault - Mentor Daily » (voir FINAL_ARCHITECTURE.md).

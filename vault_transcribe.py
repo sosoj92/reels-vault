@@ -12,6 +12,10 @@ import tempfile
 from pathlib import Path
 
 MODEL_NAME = os.environ.get("VAULT_WHISPER_MODEL", "small")
+# Amorce de vocabulaire (noms propres et termes du Vault) : aide Whisper sans rien imposer.
+VOCABULARY = ("Life Intelligence, Vault, Mentor, Nexdoor Talent, Nexdoor Partners, Halidi, "
+              "NeuroSolutions, sourcing, recrutement, Growth Hacker, CFO, Recruitment Agent, "
+              "Notion, Telegram, Qwen.")
 _MODEL = None
 
 
@@ -42,7 +46,7 @@ def transcribe_bytes(data, suffix=".oga", language="fr"):
         with os.fdopen(handle, "wb") as out:
             out.write(data)
         segments, _info = _model().transcribe(name, language=language, vad_filter=True,
-                                              beam_size=1)
+                                              beam_size=1, initial_prompt=VOCABULARY)
         text = " ".join(segment.text.strip() for segment in segments).strip()
     finally:
         Path(name).unlink(missing_ok=True)

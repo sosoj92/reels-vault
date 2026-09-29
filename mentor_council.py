@@ -369,11 +369,12 @@ def build_hypothesis(backend, context):
               "uniquement avec le JSON demande, sans inventer : seules les sources fournies "
               "comptent.")
     user = (
-        "Candidat detecte par des regles deterministes :\n"
+        "Piste reperee dans le Vault de Rosy (regles deterministes) :\n"
         + json.dumps({k: context[k] for k in ("type", "title", "score", "project", "sources")},
                      ensure_ascii=False)
-        + "\n\nRedige : title (8 mots max), summary (1 a 2 phrases), hypothesis (ce qui pourrait "
-          "etre utile a Rosy pour ce projet), actions (1 ou 2 actions concretes et prudentes)."
+        + "\n\nRedige pour Rosy, en t'adressant a elle, sans employer les mots « candidat » "
+          "ni « piste » : title (8 mots max), summary (1 a 2 phrases), hypothesis (ce qui "
+          "pourrait lui etre utile pour ce projet), actions (1 ou 2 actions concretes et prudentes)."
     )
     result = backend.chat_json(system, user, HYPOTHESIS_SCHEMA, num_predict=240)
     if not isinstance(result, dict):

@@ -858,7 +858,7 @@ def list_consultations(conn, *, suggestion_id=None, session_id=None):
     if session_id:
         sql += " AND session_id = ?"
         params.append(session_id)
-    sql += " ORDER BY created_at, consultation_id"
+    sql += " ORDER BY created_at, rowid"
     rows = []
     for row in conn.execute(sql, params).fetchall():
         item = dict(row)
