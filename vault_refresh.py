@@ -9,7 +9,9 @@ Pipeline :
 1. importe raw/index dans vault.db (V2, idempotent) ;
 2. promeut contenus + ressources explicites vers Intelligence V3 ;
 3. applique uniquement les resolutions d'identite locales marquees safe ;
-4. synchronise le working set vers le cockpit Notion si configure.
+4. synchronise le working set vers le cockpit Notion si configure ;
+5. publie les evenements du Mentor proactif (file persistante, V3). La passe
+   proactive elle-meme est decouplee : python mentor_proactive.py.
 
 L'analyse semantique FAST/CAREFUL n'est volontairement PAS lancee ici :
 elle peut etre couteuse/lente et ne doit jamais bloquer l'ingestion.
@@ -60,7 +62,29 @@ def _run_migration(vault_path, db_path):
         )
 
 
-def refresh(vault_path, db_path, *, sync_notion=True, index_semantic=True):
+def _publish_proactive_events(conn):
+    """
+    V3 : publie les evenements du Mentor proactif (file persistante).
+    Aucune detection ici : la passe est lancee separement
+    (mentor_proactive.py). Jamais bloquant.
+    """
+    try:
+        import mentor_proactive
+        import mentor_proactive_store
+
+        if not mentor_proactive_store.writes_allowed(conn):
+            return {"status": "skipped", "reason": "proactive_not_validated"}
+        return {
+            "status": "published",
+            **mentor_proactive.publish_vault_events(conn),
+        }
+    except Exception as exc:  # noqa: BLE001 - etape optionnelle
+        conn.rollback()
+        return {"status": "error", "reason": type(exc).__name__}
+
+
+def refresh(vault_path, db_path, *, sync_notion=True, index_semantic=True,
+            publish_events=True):
     vault_path = Path(vault_path).resolve()
     db_path = Path(db_path).resolve()
 
@@ -136,9 +160,14 @@ def refresh(vault_path, db_path, *, sync_notion=True, index_semantic=True):
             except Exception as exc:  # noqa: BLE001 - etape optionnelle
                 semantic_index = {"status": "error", "reason": type(exc).__name__}
 
+        proactive_events = {"status": "skipped", "reason": "disabled"}
+        if publish_events:
+            proactive_events = _publish_proactive_events(conn)
+
         return {
             "db": str(db_path),
             "semantic_index": semantic_index,
+            "proactive_events": proactive_events,
             "promotion": {
                 "contents_promoted": promoted["contents_promoted"],
                 "resources_promoted": promoted["resources_promoted"],
@@ -190,6 +219,11 @@ def main():
         action="store_true",
         help="ne pas mettre a jour l'index semantique local",
     )
+    parser.add_argument(
+        "--skip-proactive-events",
+        action="store_true",
+        help="ne pas publier d'evenements pour le Mentor proactif",
+    )
     args = parser.parse_args()
 
     result = refresh(
@@ -197,6 +231,7 @@ def main():
         args.db,
         sync_notion=not args.skip_notion,
         index_semantic=not args.skip_semantic_index,
+        publish_events=not args.skip_proactive_events,
     )
     print("\nLife Intelligence refresh:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
