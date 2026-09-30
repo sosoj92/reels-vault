@@ -1145,6 +1145,13 @@ def run(gateway, *, once=False):
                 gateway.handle_update(update)
             except Exception as exc:  # noqa: BLE001 - une update ne tue pas la passerelle
                 log.error("update en erreur : %s", type(exc).__name__)
+                try:
+                    gateway.send(
+                        "⚠️ Je n'ai pas pu traiter ce message. L'erreur a ete journalisee. "
+                        "Tu peux reessayer ou envoyer /status."
+                    )
+                except Exception:  # noqa: BLE001 - Telegram peut etre la cause de l'erreur
+                    pass
             offset = update["update_id"] + 1
             gateway.set_state("offset", offset)
         try:
