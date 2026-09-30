@@ -638,6 +638,18 @@ def clean_question(question):
     return text or " ".join(str(question or "").split())
 
 
+_PROMPT_CONTROL_WORDS = {
+    "analyse", "analyser", "montre", "montrer", "regarde", "regarder", "regardes",
+    "veux", "voudrais", "notamment", "maximum", "degrader", "qualite", "quand",
+    "quels", "quelles", "peuvent", "etre", "faits", "faire", "utiliser", "garder",
+    "selon", "tache", "taches", "puissant", "puissante", "autres", "pertinentes",
+    "classe", "classer", "gain", "potentiel", "difficulte", "implementation",
+    "priorite", "prends", "prendre", "compte", "actuel", "actuelle", "avant",
+    "ajouter", "nouvelles", "briques", "simple", "simples", "concret", "concrete",
+    "concrets", "concretes", "solution", "solutions", "informations", "information",
+}
+
+
 def compact_retrieval_query(question, max_chars=MAX_RETRIEVAL_QUERY_CHARS):
     """
     Reduit un long message utilisateur en requete de retrieval bornee.
@@ -652,7 +664,8 @@ def compact_retrieval_query(question, max_chars=MAX_RETRIEVAL_QUERY_CHARS):
         return cleaned
 
     folded = context_layer._fold(cleaned)
-    stopwords = context_layer._STOPWORDS | context_layer._RECALL_STOPWORDS
+    stopwords = context_layer._STOPWORDS | context_layer._RECALL_STOPWORDS | \
+        _PROMPT_CONTROL_WORDS
     seen = set()
     useful = []
     generic = []
