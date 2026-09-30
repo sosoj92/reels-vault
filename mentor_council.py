@@ -752,7 +752,7 @@ def review_shortlist(conn, backend, *, now=None, limit=2, independent_review=Fal
 # ------------------------------------------------------------------ modes A / B (reactif)
 
 def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources, mode,
-                       session_id=None, context=None):
+                       session_id=None, context=None, task="standard"):
     """
     Avis des agents choisis (A : un agent nomme ; B : 1 a 3 agents) sur la question,
     fondes sur les sources retrouvees par le Vault. Un seul appel Qwen.
@@ -780,8 +780,8 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
         system += (" Un CONTEXTE ACTIF est fourni : la question porte sur lui ; "
                    "ne parle pas d'autres sujets.")
     user = json.dumps(payload, ensure_ascii=False)
-    result = backend.chat_json(system, user, PANEL_SCHEMA, num_predict=380,
-                               task="standard", purpose=f"agents_mode_{mode}")
+    result = backend.chat_json(system, user, PANEL_SCHEMA, num_predict=520,
+                               task=task, purpose=f"agents_mode_{mode}")
     # Preuves admises : tout le payload sauf les playbooks generiques des agents.
     allowed = allowed_text(conn, json.dumps(
         {**payload, "specialistes": [a["name"] for a in agents]}, ensure_ascii=False))
