@@ -214,23 +214,19 @@ class Notion:
             cursor = page.get("next_cursor")
 
     def append(self, block_id, blocks, after=None):
+        """
+        Ajoute des blocs (apres `after` si fourni). Les ids crees sont determines en comparant
+        les enfants avant/apres : la reponse de l'API ne suffit pas a les identifier.
+        """
         created = []
         for start in range(0, len(blocks), 90):
+            before = {b["id"] for b in self.children(block_id)}
             body = {"children": blocks[start:start + 90]}
-            if after and not created:
-                body["after"] = after
-            elif created:
-                body["after"] = created[-1]
-            try:
-                result = self.request("PATCH", f"/blocks/{block_id}/children", body)
-            except Exception:  # noqa: BLE001 - position refusee : ajout en fin de page
-                if "after" not in body:
-                    raise
-                body.pop("after")
-                result = self.request("PATCH", f"/blocks/{block_id}/children", body)
-            ids = [b["id"] for b in result.get("results", [])]
-            # Notion renvoie toute la liste des enfants : ne garder que les blocs crees.
-            created.extend(ids[-len(blocks[start:start + 90]):] if ids else [])
+            anchor = created[-1] if created else after
+            if anchor:
+                body["position"] = {"type": "after_block", "after_block": {"id": anchor}}
+            self.request("PATCH", f"/blocks/{block_id}/children", body)
+            created.extend(b["id"] for b in self.children(block_id) if b["id"] not in before)
         return created
 
     def delete(self, block_id):
@@ -552,6 +548,20 @@ def ensure_views(conn, notion):
     urls, errors = {}, {}
     from vault_notion_cockpit import CockpitError
 
+    # Une vue filtree sur un projet exige que l'option existe (projets encore sans source).
+    import mentor_proactive
+
+    names = [mentor_proactive.VaultView(conn).entity(pid)["name"]
+             for pid in mentor_proactive.VaultView(conn).project_entities()]
+    schema = notion.request("GET", f"/data_sources/{data_source_id}")
+    current = ((schema.get("properties") or {}).get("Projets") or {}).get(
+        "multi_select", {}).get("options", [])
+    missing = [n for n in names if n not in {o["name"] for o in current}]
+    if missing:
+        notion.request("PATCH", f"/data_sources/{data_source_id}", {"properties": {"Projets": {
+            "multi_select": {"options": [{"id": o["id"], "name": o["name"]} for o in current]
+                             + [{"name": n} for n in missing]}}}})
+
     for name, kind, filt, sorts in view_specs(conn):
         if name in existing:
             urls[name] = existing[name]
@@ -820,11 +830,56 @@ def main(argv=None):
         if not notion.configured():
             print("Notion non configure (NOTION_TOKEN absent) : rien a faire.")
             return 0
-        print(json.dumps(sync_all(conn, notion, sources_only=args.sources_only),
-                         ensure_ascii=False, indent=2, default=str))
+        if not acquire_lock():
+            # Une autre synchronisation tourne (tache horaire / quotidienne / manuelle) :
+            # deux passes simultanees creeraient des doublons.
+            print("Synchronisation deja en cours : passage ignore.")
+            return 0
+        try:
+            print(json.dumps(sync_all(conn, notion, sources_only=args.sources_only),
+                             ensure_ascii=False, indent=2, default=str))
+        finally:
+            LOCK_FILE.unlink(missing_ok=True)
     finally:
         conn.close()
     return 0
+
+
+LOCK_FILE = ROOT / "logs" / "notion_library.lock"
+
+
+def _pid_alive(pid):
+    import os
+
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def acquire_lock(path=None):
+    """Verrou d'instance unique (PID). Un verrou orphelin (processus mort) est repris."""
+    import os
+
+    path = Path(path or LOCK_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            if _pid_alive(int(path.read_text().strip())):
+                return False
+        except (ValueError, OSError):
+            pass
+    path.write_text(str(os.getpid()))
+    return True
 
 
 if __name__ == "__main__":

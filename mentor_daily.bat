@@ -17,5 +17,10 @@ pushd "%ROOT%" || exit /b 1
 if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
 "%PY%" "%ROOT%\mentor_proactive.py" --confirm --with-agents --review-limit 2 >> "%ROOT%\logs\mentor_daily.log" 2>&1
 set "RC=%errorlevel%"
+
+rem PC au repos : classement des contenus en attente (routeur LLM), puis fiches projet,
+rem vues et portails Notion rafraichis.
+"%PY%" "%ROOT%\vault_ingestion.py" --retry --classify-existing --limit 15 >> "%ROOT%\logs\mentor_daily.log" 2>&1
+"%PY%" "%ROOT%\vault_notion_library.py" --confirm >> "%ROOT%\logs\mentor_daily.log" 2>&1
 popd
 exit /b %RC%

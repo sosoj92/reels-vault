@@ -3,78 +3,69 @@
 ```
 ROSY
  ↓
-Telegram (PC + mobile)                    telegram_gateway.py
+Telegram (PC + mobile) · Inbox locale · Sync mobile
  ↓
-Life Gateway
- ├── Réactif  : texte · vocal · URL · réponse · commande
- └── Proactif : 💡 suggestions · digest · pause · snooze
+Life Gateway                      telegram_gateway.py + vault_ingestion.py
+ ├── Réactif  : questions, vocaux, agents (modes A/B), contexte « ça »
+ └── Proactif : 💡 suggestions, digest, pause, snooze
  ↓
-Retrieval                                  vault_ask.py (lexical + sémantique local)
+Vault / Retrieval                 vault.db · vault_ask.py (projets, recherche lexicale + sémantique)
  ↓
-Mentor                                     mentor_proactive.py → mentor_council.py → mentor_delivery.py
+Mentor Engine                     mentor_proactive.py → mentor_council.py → mentor_delivery.py
  ↓
-Agency Agents (spécialistes, modes A/B/C)  vault_agent_registry.py + vault_orchestrator.py
+Agency Agents                     vault_agent_registry.py + vault_orchestrator.py (modes A/B/C)
  ↓
-Qwen (Ollama, local)                       qwen3:1.7b, num_ctx 4096
+LLM Router                        llm_router.py
+ ├── Qwen / Ollama local (léger, si le PC est libre)
+ ├── Mistral API (standard)
+ └── Claude API (complexe, optionnelle)
  ↓
-vault.db  ← source de vérité
- ├── Notion   : cockpit existant (Suggestion / Décision) + Tâches existantes
+vault.db = source de vérité
+ ├── Notion   : cockpit, Vault Library, fiches projet, décisions, tâches
  ├── Tasks    : table actions (créées seulement après ton clic)
- └── Telegram : messages, boutons, contexte de session
+ ├── Drive    : fichiers (dossiers liés aux projets)
+ └── Calendar : temps et échéances
 ```
 
 ## Les rôles, simplement
 
 | Élément | Rôle |
 |---|---|
-| **Vault** (`vault.db`) | La mémoire. Tout y est écrit en premier ; c'est l'arbitre final. |
-| **Mentor** | Le directeur de cabinet : observe les événements, relie les sources aux projets, priorise, et décide **s'il doit parler** (souvent : non). |
-| **Agents** (Agency Agents) | Les spécialistes : Recruitment Specialist, Growth Hacker, CFO, Workflow Architect… Ils évaluent, ils n'agissent pas. |
-| **Qwen** | Le moteur de raisonnement local. Aucun cloud, aucun repli automatique vers le cloud. |
-| **Telegram** | La bouche et les oreilles : l'interface, pas le cerveau. |
-| **Notion** | Le cockpit : voir, décider (Approuver / Garder comme insight / Reporter / Ignorer), suivre les tâches. |
-| **Drive** | Les fichiers (dossiers de projets reliés aux entités). |
-| **Calendar** | Le temps (planification existante des tâches). |
+| **Vault** | La mémoire : tout y est écrit en premier (sources, relations, historique). |
+| **Mentor** | Le directeur de cabinet : observe, relie, priorise, et décide s'il faut parler (souvent : non). |
+| **Agents** | Les spécialistes (Recruitment Specialist, Growth Hacker, CFO…) : ils évaluent, ils n'agissent pas. |
+| **LLM Router** | Choisit le moteur adapté (local, Mistral, Claude) sans surcharger le PC ni le budget. |
+| **Telegram** | La bouche et les oreilles : tu y ajoutes et tu y parles. |
+| **Notion** | Le cockpit : tu y consultes et tu y pilotes. Jamais un second Vault. |
+| **Drive** | Les fichiers. |
+| **Calendar** | Le temps. |
 
-## Les deux canaux
-
-**Réactif** (tu parles) — texte, vocal (transcrit localement par faster-whisper), URL (ajoutée à l'inbox),
-réponse à un message (le contexte est retrouvé), commande. Le Vault est interrogé, Qwen synthétise,
-les agents sont consultés si utile :
-- mode **A** : « Demande au CFO… » — l'agent nommé ;
-- mode **B** : « Comment exploiter ça pour Nexdoor Talent ? » — 1 à 3 agents choisis et justifiés ;
-  « ajoute le CFO », « sans le Growth Hacker », « demande plutôt au Recruitment Agent ».
-
-**Proactif** (le Mentor parle, rarement) :
-
-```
-EVENT → détection déterministe → candidat → score → shortlist
-      → Qwen (hypothèse) → Agents mode C (verdicts 0–5) → filtre final → SUG-xxxx
-      → 1 push/jour max · le reste en digest · silence sinon
-      → ta décision (Telegram ou Notion) → vault.db → Notion / tâche
-```
-
-Une suggestion n'existe que si : projet actif et profil complet, preuve suffisante (shortlist),
-nouveau (empreinte), actionnable, au moins un agent ≥ 4/5, aucune objection bloquante, fatigue faible.
-Les désaccords sérieux entre agents sont affichés.
+## Au quotidien
+- **J'ajoute** : Telegram (lien, note « garde ça : … », vocal, fichier) ; gros fichiers → `inbox\files` ;
+  personnel/sensible → `inbox\sensitive`. Voir `docs/INGESTION.md`.
+- **Je retrouve** : Notion → COMMAND CENTER → 📚 Explorer ma mémoire, ou Telegram
+  « que sais-tu de Nexdoor Talent ? ». Voir `docs/NOTION_VAULT_LIBRARY.md`.
+- **Je pilote un projet** : Notion → 💼 Mes activités & projets → fiche du projet.
+- **Le Mentor me signale** : au plus 1 message 💡 par jour, le reste en digest ; « mets le Mentor
+  en pause jusqu'à lundi » le fait taire (il continue d'observer).
+- **Je modifie un projet** : `mentor_project_profiles.py --export / --import`.
+- **Mes SOP** : dans la fiche projet, section SOP (sous-pages Process/SOP existantes).
 
 ## Garde-fous
-
-- Aucune action externe sans ton clic (tâche, Notion Tâches) ; aucune suppression.
-- Candidats et rejets : uniquement dans `vault.db`, jamais projetés.
-- Telegram : whitelist utilisateur **et** chat, aucune commande shell, aucun accès fichier
-  (sauf ajout d'URL à l'inbox), token uniquement dans `.env` (ignoré par Git), jamais journalisé.
-- Données santé personnelles : jamais rattachées à un projet.
-- Pause (« mets le Mentor en pause jusqu'à lundi ») et mode focus : il observe et journalise, n'envoie rien.
+Aucune action externe sans ton clic · aucune suppression · secrets jamais stockés ni envoyés à
+un LLM · données sensibles traitées en local uniquement · candidats et rejets jamais projetés ·
+Telegram : whitelist utilisateur **et** chat, aucune commande shell · budgets LLM jamais dépassés
+en silence.
 
 ## Ce qui tourne, et quand
 
 | Composant | Déclenchement |
 |---|---|
-| Ingestion + refresh (publie les événements) | Tâches existantes « Reels Vault Ingest » / « Hourly » : toutes les heures |
-| Passerelle Telegram | « Reels Vault - Telegram Gateway » : à l'ouverture de session, en permanence, relancée si elle tombe |
-| Passage quotidien du Mentor (Qwen + Agents) | « Reels Vault - Mentor Daily » : 07:30 et 20 min après l'ouverture de session, **PC au repos uniquement**, rattrapage si le PC était éteint |
-| Livraison des suggestions, synchro des décisions Notion | Dans la passerelle : toutes les minutes (Notion toutes les 10 min) |
-| Réponses aux questions | À chaque message |
+| Ingestion vidéo + refresh + Mentor horaire + inbox locale + Vault Library (sources) | « Reels Vault Ingest » / « Hourly » : toutes les heures |
+| Passerelle Telegram | « Reels Vault - Telegram Gateway » : à l'ouverture de session, en permanence (attente réseau, quasi aucun CPU) |
+| Mentor quotidien (Qwen/Agents), classement en attente, fiches projet, vues, portails | « Reels Vault - Mentor Daily » : 07:30 et 20 min après l'ouverture de session, **PC au repos**, rattrapage |
+| Suggestions, digest, décisions Notion | dans la passerelle (1 min / 10 min) |
+| Questions, ajouts | à chaque message |
 
-Détails techniques : `docs/MENTOR_PROACTIVE_V3.md`.
+Détails : `docs/MENTOR_PROACTIVE_V3.md`, `docs/LLM_ROUTER.md`, `docs/INGESTION.md`,
+`docs/NOTION_VAULT_LIBRARY.md`.

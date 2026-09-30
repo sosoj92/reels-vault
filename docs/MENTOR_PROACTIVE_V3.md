@@ -192,3 +192,13 @@ Configuration : `python telegram_setup.py` (token masqué → `.env`, IDs détec
 
 ### Démarrage
 `setup_windows_tasks.ps1` enregistre « Reels Vault - Telegram Gateway » et « Reels Vault - Mentor Daily » (voir FINAL_ARCHITECTURE.md).
+
+## Clôture finale : routeur LLM, ingestion unifiée, Vault Library
+- Tous les appels LLM du Mentor, des Agency Agents, de Telegram et des synthèses passent par
+  `llm_router.py` (voir `docs/LLM_ROUTER.md`). Mode C : **un** appel structuré produit les verdicts
+  des 1 à 3 agents ; `independent_review=True` garde les contre-expertises séparées.
+- Journal et budget LLM : `logs/llm_usage.db` (jamais `vault.db`, qui reste inchangé en dry-run).
+- Ingestion unifiée : `vault_ingestion.py` + table `ingestion_items` (voir `docs/INGESTION.md`).
+- Projection Notion : `vault_notion_library.py`, tables `notion_library_links` et
+  `notion_managed_blocks` (voir `docs/NOTION_VAULT_LIBRARY.md`).
+- Tests hors ligne : `tests/_isolation.py` bloque toute connexion réseau (échec immédiat).

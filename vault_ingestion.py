@@ -423,6 +423,8 @@ def ingest_note(conn, text, *, channel="telegram", telegram_message_id=None, sou
                             sensitivity="secret")
         return {"status": "rejected_secret", "item_id": item_id}
     body = SAVE_RE.sub("", text, count=1).strip(" :-") or text
+    # « pour Nexdoor Talent : … » : le projet est rattache, le titre garde le contenu.
+    body = re.sub(r"^pour\s+[^:\n]{2,60}:\s*", "", body, flags=re.IGNORECASE) or body
     project_id = _project_from_text(conn, text)
     key = telegram_message_id or hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     url = f"note://{channel}/{key}"

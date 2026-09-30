@@ -29,6 +29,7 @@ class FakeNotionAPI:
         self.databases = {}
         self.views = {}
         self.writes = 0
+        self.project_options = []
 
     def configured(self):
         return True
@@ -74,7 +75,10 @@ class FakeNotionAPI:
         if parts[0] == "blocks" and parts[-1] == "children" and method == "PATCH":
             if _depth(body["children"]) > 3:
                 raise CockpitError("nesting too deep")
-            after, created = body.get("after"), []
+            if "after" in body:
+                raise CockpitError("body.after should be not present")  # API reelle
+            after = ((body.get("position") or {}).get("after_block") or {}).get("id")
+            created = []
             for b in body["children"]:
                 after = self._add(parts[1], b, after=after)
                 created.append(self.blocks[after])
@@ -104,6 +108,13 @@ class FakeNotionAPI:
         if parts[0] == "pages" and method == "PATCH":
             self.pages[parts[1]]["properties"].update(body["properties"])
             return self.pages[parts[1]]
+        if parts[0] == "data_sources" and len(parts) == 2 and method == "GET":
+            return {"properties": {"Projets": {"multi_select": {"options": [
+                {"id": f"o{i}", "name": n} for i, n in enumerate(self.project_options)]}}}}
+        if parts[0] == "data_sources" and len(parts) == 2 and method == "PATCH":
+            self.project_options = [o["name"] for o in
+                                    body["properties"]["Projets"]["multi_select"]["options"]]
+            return {}
         if parts[0] == "data_sources" and parts[-1] == "query":
             ref = body["filter"]["rich_text"]["equals"]
             found = [p for p in self.pages.values() if p.get("parent") == parts[1] and
@@ -263,6 +274,9 @@ class ViewsProjectsPortalsTests(LibraryCase):
         self.assertEqual(len(self.api.views), len(urls))  # aucune vue en double
         talent = next(v for v in self.api.views.values() if v["name"] == "💼 Nexdoor Talent")
         self.assertEqual(talent["filter"]["multi_select"]["contains"], "Nexdoor Talent")
+        # Projets sans source : leur option est declaree avant la vue filtree.
+        self.assertIn("Nexdoor Partners", self.api.project_options)
+        self.assertIn("💼 Nexdoor Partners", urls)
 
     def test_project_page_gets_a_managed_operating_section(self):
         lib.sync_sources(self.conn, self.notion)
@@ -296,6 +310,19 @@ class ViewsProjectsPortalsTests(LibraryCase):
         self.assertEqual(lib.sync_portals(self.conn, self.notion, {})["command_center"],
                          "unchanged")
         self.assertIn("🧭 Mentor Insights", self.api.texts(self.knowledge))
+
+
+class LockTests(unittest.TestCase):
+    def test_concurrent_syncs_are_prevented(self):
+        import os
+
+        lock = _isolation.TMP / "notion_library.lock"
+        lock.unlink(missing_ok=True)
+        self.assertTrue(lib.acquire_lock(lock))            # premiere passe
+        self.assertFalse(lib.acquire_lock(lock))           # passe concurrente refusee
+        lock.write_text("999999")                          # verrou orphelin (processus mort)
+        self.assertTrue(lib.acquire_lock(lock))
+        self.assertEqual(lock.read_text(), str(os.getpid()))
 
 
 if __name__ == "__main__":

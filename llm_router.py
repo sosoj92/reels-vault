@@ -93,6 +93,23 @@ class LLMError(RuntimeError):
     pass
 
 
+def _load_llm_env(path=ROOT / ".env"):
+    """Reglages LLM du .env local (uniquement LLM_/OLLAMA_/MISTRAL_/ANTHROPIC_), sans ecraser."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        if "=" not in line or line.lstrip().startswith("#"):
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key.startswith(("LLM_", "OLLAMA_", "MISTRAL_", "ANTHROPIC_")):
+            os.environ.setdefault(key, value)
+
+
+_load_llm_env()
+
+
 def cfg(name):
     value = os.environ.get(name)
     return value if value not in (None, "") else DEFAULTS.get(name, "")

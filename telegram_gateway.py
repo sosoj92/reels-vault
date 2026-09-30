@@ -476,6 +476,8 @@ class Gateway:
         lines = ["📥 Derniers ajouts :"]
         for item in items:
             title = item.get("title") or item.get("original_filename") or item.get("original_url")
+            if item["status"] == "rejected_secret":
+                title = "(secret detecte : non enregistre)"
             lines.append(f"{icons.get(item['kind'], '•')} {str(title)[:70]} — {item['status']}")
         self.send("\n".join(lines))
         return f"inbox:{len(items)}"
@@ -543,6 +545,9 @@ class Gateway:
             result = {"answer": grounded["text"], "sources": grounded["sources"]}
         else:
             result = self._ask(question, llm="off" if agents else "auto")
+            if result.get("route") == "project_view" and mode != "A":
+                # Question factuelle sur un projet : la vue du Vault suffit, pas d'agents.
+                mode, agents = None, []
         lines = [result["answer"]]
         panel = None
         placeholder = None
