@@ -5,7 +5,9 @@ telegram_gateway.py - Life Gateway : Telegram, interface principale (PC + mobile
 Telegram est l'interface, pas le cerveau :
 - REACTIF : texte, vocal (transcrit localement), URL, reponse a un message, commande
   -> retrieval du Vault (vault_ask) -> Qwen local -> Agency Agents (modes A/B)
-  -> reponse ;
+  -> reponse ; une longue demande d'analyse passe en CONSULTATION (Vault en appui,
+  question complete au LLM via la tache complex du routeur) ; toute reponse longue
+  est decoupee en plusieurs messages, jamais tronquee ;
 - PROACTIF : suggestions du Mentor (mentor_delivery : budget, digest, pause,
   heures calmes) -> 💡 message court + boutons -> decision ecrite dans vault.db
   -> cockpit Notion mis a jour.
@@ -257,8 +259,33 @@ class Gateway:
             and str(user_id) == self.allowed_user and str(chat_id) == self.allowed_chat
 
     def send(self, text, **kwargs):
-        result = self.client.send_message(self.chat_id, text, **kwargs)
-        return (result or {}).get("message_id")
+        ids = self.send_parts(text, **kwargs)
+        return ids[-1] if ids else None
+
+    def send_parts(self, text, *, buttons=None, reply_to=None, placeholder=None):
+        """
+        Envoie un texte de toute longueur : decoupe sans perte au-dela de la limite
+        Telegram (jamais de troncature silencieuse). Le premier morceau remplace le
+        message d'attente s'il y en a un ; les boutons vont sur le dernier morceau.
+        Retourne les message_id de tous les morceaux.
+        """
+        chunks = telegram_api.split_text(text)
+        ids = []
+        for index, chunk in enumerate(chunks):
+            last = index == len(chunks) - 1
+            if index == 0 and placeholder is not None:
+                try:
+                    self.client.edit_message(self.chat_id, placeholder, chunk,
+                                             buttons=buttons if last else None)
+                    ids.append(placeholder)
+                    continue
+                except telegram_api.TelegramError:
+                    pass
+            result = self.client.send_message(self.chat_id, chunk,
+                                              buttons=buttons if last else None,
+                                              reply_to=reply_to if index == 0 else None)
+            ids.append((result or {}).get("message_id"))
+        return ids
 
     # -------------------------------------------------------------- updates
     def handle_update(self, update):
@@ -566,89 +593,39 @@ class Gateway:
             })
         return {"projets": projects} if projects else None
 
-    def lis_runtime_context(self):
-        """Configuration LIS courante, sans secret, pour les questions sur le systeme lui-meme."""
-        if self.backend is None:
-            status = {}
-        else:
-            try:
-                status = self.backend.status()
-            except Exception:  # noqa: BLE001 - contexte d'appoint uniquement
-                status = {}
-        try:
-            import llm_router
+    def consult(self, question, *, reply_to=None, project_ids=()):
+        """
+        Longue demande d'analyse : le Vault fournit des preuves (requete compacte, sans
+        LLM), puis UN appel LLM recoit la question complete (tache complex du routeur).
+        Les agents ne sont ajoutes que s'ils sont nommes, via le paquet portable.
+        """
+        import vault_ask
+        import vault_orchestrator as orchestrator
 
-            policy = {
-                "light_chain": llm_router.cfg("LLM_CHAIN_LIGHT"),
-                "standard_chain": llm_router.cfg("LLM_CHAIN_STANDARD"),
-                "complex_chain": llm_router.cfg("LLM_CHAIN_COMPLEX"),
-                "local_model": llm_router.cfg("OLLAMA_MODEL"),
-                "openrouter_standard_model": llm_router.cfg("OPENROUTER_STANDARD_MODEL"),
-                "openrouter_complex_model": llm_router.cfg("OPENROUTER_COMPLEX_MODEL"),
-                "openrouter_daily_budget_usd": llm_router.cfg("OPENROUTER_DAILY_BUDGET_USD"),
-            }
-        except Exception:  # noqa: BLE001
-            policy = {}
-        return {
-            "system": "Life Intelligence System",
-            "data_flow": [
-                "Telegram -> retrieval Vault (vault_ask)",
-                "consultation -> Agency Agents (mentor_council)",
-                "LLM -> routeur central (llm_router)",
-                "source de verite -> vault.db",
-                "cockpit humain -> Notion",
-            ],
-            "retrieval": "source-first, contexte borne, synthese LLM optionnelle",
-            "telegram": {
-                "polling": True,
-                "mentor_tick_seconds": TICK_SECONDS,
-                "notion_sync_seconds": NOTION_SYNC_SECONDS,
-            },
-            "llm_policy": policy,
-            "llm_status": status,
-        }
-
-    @staticmethod
-    def answer_chunks(text, limit=3800):
-        """Decoupe sans perte les longues reponses avant la limite Telegram."""
-        text = str(text or "").strip()
-        if not text:
-            return [""]
-        chunks = []
-        rest = text
-        while len(rest) > limit:
-            window = rest[:limit]
-            cut = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(". "))
-            if cut < int(limit * 0.55):
-                cut = window.rfind(" ")
-            if cut < int(limit * 0.4):
-                cut = limit
-            else:
-                cut += 1
-            chunks.append(rest[:cut].strip())
-            rest = rest[cut:].strip()
-        if rest:
-            chunks.append(rest)
-        return chunks or [""]
-
-    def deliver_answer(self, text, *, placeholder=None, reply_to=None):
-        """Envoie toute la reponse, en plusieurs messages si necessaire."""
-        chunks = self.answer_chunks(text)
-        message_ids = []
-        start = 0
-        if placeholder is not None:
-            try:
-                self.client.edit_message(self.chat_id, placeholder, chunks[0])
-                message_ids.append(placeholder)
-                start = 1
-            except telegram_api.TelegramError:
-                start = 0
-        for index in range(start, len(chunks)):
-            message_ids.append(self.send(chunks[index], reply_to=reply_to if index == 0 else None))
-        return message_ids
+        placeholder = self.send("🧠 Analyse en cours…", reply_to=reply_to)
+        evidence = self._ask(question, llm="off")
+        # Meme paquet portable que ChatGPT / CLI : playbooks des agents NOMMES seulement.
+        packet = orchestrator.build_consultation_packet(question, auto_select=False)
+        playbooks = {p["name"]: p["playbook"] for p in packet["agent_playbooks"]}
+        agents = [{"name": a["name"], "role": a["description"],
+                   "playbook": playbooks.get(a["name"])} for a in packet["selected_agents"]]
+        router = self.backend if hasattr(self.backend, "complete_text") else None
+        result = vault_ask.consult(question, evidence=evidence, router=router, agents=agents,
+                                   project_context=self.project_consult_context(project_ids))
+        ids = self.send_parts(result["answer"], reply_to=reply_to, placeholder=placeholder)
+        source_ids = [s.get("source_id") for s in result["sources"] if s.get("source_id")]
+        for message_id in ids:
+            self.remember(message_id, "answer", question=question,
+                          agents=[a["name"] for a in agents], mode="consult",
+                          payload={"sources": source_ids, "anchor": None})
+        if source_ids:
+            self.set_active("sources", source_ids=source_ids, question=question)
+        self._publish_question(question, result["sources"])
+        return "answer:consult"
 
     def answer(self, question, *, anchor=None, adjustment=None, base=None, reply_to=None):
         import mentor_council as council
+        import vault_ask
 
         try:
             self.client.send_chat_action(self.chat_id)
@@ -665,6 +642,9 @@ class Gateway:
         if grounded:
             grounded["agent_context"]["projets_mentionnes"] = [
                 _project_name(self.conn, pid) for pid in project_ids]
+
+        if not adjustment and not grounded and vault_ask.is_consultation(question):
+            return self.consult(question, reply_to=reply_to, project_ids=project_ids)
 
         if adjustment:
             prior = base.get("agents") or []
@@ -704,10 +684,9 @@ class Gateway:
         placeholder = None
         consultation_context = grounded["agent_context"] if grounded \
             else self.project_consult_context(project_ids)
-        folded_question = fold(question)
-        if "life intelligence" in folded_question or re.search(r"(?<![a-z0-9])lis(?![a-z0-9])",
-                                                                folded_question):
-            lis_context = self.lis_runtime_context()
+        if agents and vault_ask.about_lis(question):
+            # Meme contexte LIS que la consultation (configuration reelle, sans reseau ni secret).
+            lis_context = vault_ask.lis_context(self.backend)
             if consultation_context:
                 consultation_context = {**consultation_context, "lis_runtime": lis_context}
             else:
@@ -729,23 +708,24 @@ class Gateway:
 
         if panel and panel["opinions"]:
             # Priorite a la reponse utile : le dump complet du retrieval reste dans le Vault.
-            lines = ["🧠 Analyse"]
+            # Contrat V3 conserve : contexte actif, mode, agents consultes et pourquoi.
+            lines = [grounded["text"], ""] if grounded else []
+            lines.append("🧠 Analyse")
             if panel.get("synthesis"):
-                lines.append(panel["synthesis"])
+                lines.append(f"Synthèse : {panel['synthesis']}")
             lines.append("")
-            lines.append("🤝 Regards consultes :")
-            reasons = {a["name"]: a["reason"] for a in agents}
+            lines.append("🤝 Agents consultes (mode " + (mode or "B") + ") :")
+            for agent in agents:
+                lines.append(f"• {agent['name']} — {agent['reason']}")
             for opinion in panel["opinions"]:
-                reason = reasons.get(opinion["agent"])
-                suffix = f" ({reason})" if reason else ""
-                lines.append(f"\n{opinion['agent']}{suffix} : {opinion['opinion']}")
-            if result["sources"]:
+                lines.append(f"\n{opinion['agent']} : {opinion['opinion']}")
+            if result["sources"] and not grounded:
                 lines.append("")
                 lines.append("📚 Sources Vault retenues :")
                 for source in result["sources"][:3]:
                     title = source.get("title") or f"source {source.get('source_id')}"
                     url = source.get("url")
-                    lines.append(f"• {str(title)[:110]}" + (f" — {url}" if url else ""))
+                    lines.append(f"- {str(title)[:110]}" + (f" — {url}" if url else ""))
         else:
             lines = [result["answer"]]
             if agents:
@@ -757,8 +737,8 @@ class Gateway:
                 for agent in agents:
                     lines.append(f"• {agent['name']} — {agent['reason']}")
 
-        message_ids = self.deliver_answer("\n".join(lines), placeholder=placeholder,
-                                          reply_to=reply_to)
+        message_ids = self.send_parts("\n".join(lines), placeholder=placeholder,
+                                      reply_to=reply_to)
         source_ids = [s.get("source_id") for s in result["sources"] if s.get("source_id")]
         suggestion_id = grounded.get("suggestion_id") if grounded else None
         for message_id in message_ids:

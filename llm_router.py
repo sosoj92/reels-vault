@@ -501,7 +501,8 @@ class GeminiProvider:
         usage = raw.get("usageMetadata") or {}
         output = (usage.get("candidatesTokenCount") or 0) + (usage.get("thoughtsTokenCount") or 0)
         return {"text": text, "input_tokens": usage.get("promptTokenCount"),
-                "output_tokens": output or None, "model": raw.get("modelVersion") or model}
+                "output_tokens": output or None, "model": raw.get("modelVersion") or model,
+                "finish_reason": (candidates[0].get("finishReason") or "").lower() or None}
 
 
 class OpenRouterProvider:
@@ -582,10 +583,12 @@ class OpenRouterProvider:
             raise
         usage = raw.get("usage") or {}
         self._credits_at = -1e9  # credit a relire apres consommation
-        return {"text": raw["choices"][0]["message"]["content"],
+        choice = raw["choices"][0]
+        return {"text": choice["message"]["content"],
                 "input_tokens": usage.get("prompt_tokens"),
                 "output_tokens": usage.get("completion_tokens"),
-                "cost_usd": usage.get("cost"), "model": raw.get("model") or models[0]}
+                "cost_usd": usage.get("cost"), "model": raw.get("model") or models[0],
+                "finish_reason": choice.get("finish_reason"), "generation_id": raw.get("id")}
 
 
 # ------------------------------------------------------------------ routeur
@@ -691,6 +694,29 @@ class LLMRouter:
 
     def available(self, task="light", sensitivity="internal"):
         return any(self.usable(n)[0] for n in self.chain(task, sensitivity))
+
+    def describe(self):
+        """
+        Configuration effective, sans secret ni appel reseau : chaines par tache et
+        fournisseurs configures (booleen + modele). Sert de contexte aux questions sur le LIS.
+        """
+        providers = {}
+        for name, provider in self.providers.items():
+            item = {"configured": bool(provider.configured()), "cloud": provider.cloud}
+            if hasattr(provider, "model_for"):
+                item["models"] = {task: provider.model_for(task)
+                                  for task in ("light", "standard", "complex")}
+            else:
+                item["model"] = getattr(provider, "model", None)
+            providers[name] = item
+        chains = {task: [n.strip() for n in cfg(f"LLM_CHAIN_{task.upper()}").split(",")
+                         if n.strip()] for task in ("light", "standard", "complex")}
+        return {"chains": chains, "providers": providers,
+                "cloud_enabled": flag("LLM_CLOUD_ENABLED"),
+                "personal_cloud_allowed": flag("LLM_PERSONAL_CLOUD_ALLOWED"),
+                "sensitive_cloud_allowed": flag("LLM_SENSITIVE_CLOUD_ALLOWED"),
+                "budgets": {"daily_eur": cfg("LLM_DAILY_BUDGET_EUR"),
+                            "openrouter_daily_usd": cfg("OPENROUTER_DAILY_BUDGET_USD")}}
 
     def status(self):
         out = {}
@@ -799,6 +825,11 @@ class LLMRouter:
             self.last = {"provider": None, "reason": "secret detecte : aucun LLM",
                          "queued": False}
             return None
+        # Frontiere de confiance : le contenu des sources n'est jamais une instruction.
+        from vault_security_gate import UNTRUSTED_RULE
+
+        if UNTRUSTED_RULE not in system:
+            system = f"{system}\n\n{UNTRUSTED_RULE}"
         previous = None
         reasons = {}
         for name in self.chain(task, sensitivity):
@@ -818,6 +849,13 @@ class LLMRouter:
                     if schema and not isinstance(result, dict):
                         raise LLMError("sortie JSON invalide")
                     self.breaker.success(name)
+                    if provider.cloud and not (raw.get("input_tokens")
+                                               or raw.get("output_tokens")):
+                        # Usage non remonte (observe : 0 token, 0 $ via OpenRouter) : estimation
+                        # prudente (~4 caracteres / token) pour que les budgets ne sous-comptent pas.
+                        raw = {**raw, "input_tokens": (len(system) + len(user)) // 4,
+                               "output_tokens": len(str(raw.get("text") or "")) // 4,
+                               "cost_usd": None, "usage_estimated": True}
                     cost_eur, cost_usd = self._costs(name, raw)
                     self._log(provider=name, model=raw.get("model"), task=task, purpose=purpose,
                               sensitivity=sensitivity, input_tokens=raw.get("input_tokens"),
@@ -826,7 +864,13 @@ class LLMRouter:
                               duration_ms=round((time.perf_counter() - started) * 1000),
                               success=1, fallback_from=previous)
                     self.last = {"provider": name, "model": raw.get("model"),
-                                 "fallback_from": previous, "skipped": reasons}
+                                 "fallback_from": previous, "skipped": reasons,
+                                 "finish_reason": raw.get("finish_reason"),
+                                 "input_tokens": raw.get("input_tokens"),
+                                 "output_tokens": raw.get("output_tokens"),
+                                 "cost_usd": cost_usd,
+                                 "usage_estimated": bool(raw.get("usage_estimated")),
+                                 "generation_id": raw.get("generation_id")}
                     return result
                 except Exception as exc:  # noqa: BLE001 - toute panne -> fournisseur suivant
                     if isinstance(exc, NetworkDown) and provider.cloud:

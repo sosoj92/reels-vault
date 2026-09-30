@@ -65,8 +65,40 @@ def mask(token):
 
 
 def clip(text, limit=MAX_TEXT):
+    """Garde-fou pour les textes courts (boutons, notifications) ; les reponses passent par split_text."""
     text = str(text or "")
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _units(text):
+    # Telegram compte la limite en unites UTF-16 (un emoji peut en valoir 2).
+    return len(text.encode("utf-16-le")) // 2
+
+
+def split_text(text, limit=MAX_TEXT):
+    """
+    Decoupe un texte en morceaux <= limit, sans rien perdre : coupe de preference
+    entre paragraphes, puis entre lignes, puis entre mots. Seuls les blancs situes
+    au point de coupe disparaissent.
+    """
+    text = str(text or "")
+    chunks = []
+    while _units(text) > limit:
+        window = text[:limit]
+        while _units(window) > limit:
+            window = window[:-1]
+        cut = -1
+        for separator in ("\n\n", "\n", " "):
+            cut = window.rfind(separator)
+            if cut > limit // 3:
+                break
+        if cut <= 0:
+            cut = len(window)  # mot unique plus long que la limite : coupe franche
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip("\n ")
+    if text.strip() or not chunks:
+        chunks.append(text)
+    return chunks
 
 
 class TelegramClient:

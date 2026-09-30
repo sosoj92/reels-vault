@@ -1,5 +1,6 @@
 import _isolation  # noqa: F401  (EN PREMIER : isole le vrai Vault)
 
+import json
 import sqlite3
 import os
 import time
@@ -223,6 +224,24 @@ class AskTests(AskFixture):
         self.assertIn("rtk", result["retrieval_query"])
         self.assertIn("tokens", result["retrieval_query"])
         self.assertEqual(result["sources"][0]["source_id"], self.rtk)
+        # Mots de consigne (« analyse », « priorites »...) : hors de la requete de retrieval.
+        terms = result["retrieval_query"].split()
+        for word in ("analyse", "detaillee", "priorites", "solutions", "concretes"):
+            self.assertNotIn(word, terms)
+        self.assertLessEqual(len(terms), vault_ask.MAX_RETRIEVAL_TERMS)
+
+    def test_long_health_question_stays_sensitive_after_compaction(self):
+        question = ("Analyse en detail mes options et propose un plan. " * 12
+                    + "Que dit mon Vault sur la guanfacine pour le TDAH ?")
+        result = vault_ask.ask(self.conn, question, llm="off", semantic="off")
+        self.assertTrue(result["sensitive"])
+
+    def test_truncated_numbered_list_does_not_end_on_orphan_marker(self):
+        self.assertEqual(
+            vault_ask._complete_sentences("1. Cache local. 2. Retrieval cible. 3."),
+            "1. Cache local. 2. Retrieval cible.")
+        self.assertEqual(vault_ask._complete_sentences("Passe en version 2."),
+                         "Passe en version 2.")
 
     def test_no_result_answer_does_not_invent(self):
         result = vault_ask.ask(
@@ -352,6 +371,118 @@ class AskApiTests(unittest.TestCase):
         self.assertIn("RTK", data["answer"])
         self.assertEqual(data["llm"]["status"], "disabled")
         self.assertEqual(empty.status_code, 422)
+
+
+LIS_QUESTION = (
+    "Analyse mon Life Intelligence System actuel et montre-moi toutes les solutions "
+    "concretes pour reduire au maximum ma consommation de tokens sans degrader la qualite. "
+    "Je veux notamment que tu regardes quand utiliser ou non un LLM, quels traitements "
+    "peuvent etre faits localement, comment reduire la taille du contexte envoye aux "
+    "modeles, quels modeles OpenRouter utiliser selon la difficulte de la tache, ou garder "
+    "un modele plus puissant, cache, resumes, embeddings, retrieval cible. Classe les "
+    "recommandations par gain potentiel, difficulte d'implementation et priorite. "
+    "Prends en compte l'architecture actuelle du LIS."
+)
+
+
+class FakeRouter:
+    def __init__(self, reply="1. Garder le retrieval deterministe [1]. 2. Router en complex."):
+        self.reply = reply
+        self.calls = []
+        self.last = None
+
+    def complete_text(self, system, user, *, max_tokens=300, task="light", sensitivity=None,
+                      purpose=None):
+        self.calls.append({"system": system, "user": user, "task": task,
+                           "max_tokens": max_tokens, "purpose": purpose})
+        self.last = {"provider": "openrouter", "model": "google/gemini-2.5-flash"} \
+            if self.reply else {"provider": None, "reason": "aucun fournisseur disponible"}
+        return self.reply
+
+    def describe(self):
+        return {"chains": {"complex": ["gemini", "openrouter"]},
+                "providers": {"openrouter": {"configured": True}}}
+
+
+class ConsultTests(AskFixture):
+    def evidence(self, question=LIS_QUESTION):
+        return vault_ask.ask(self.conn, question, mode="consult", llm="off", semantic="off")
+
+    def test_detection_keeps_short_questions_on_the_historical_path(self):
+        self.assertFalse(vault_ask.is_consultation("Qu'est-ce que j'avais sauvegardé sur les tokens ?"))
+        self.assertFalse(vault_ask.is_consultation("Analyse RTK"))
+        self.assertTrue(vault_ask.is_consultation(LIS_QUESTION))
+        self.assertTrue(vault_ask.about_lis(LIS_QUESTION))
+        self.assertFalse(vault_ask.about_lis("Que sais-je sur la prospection LinkedIn ?"))
+
+    def test_full_question_goes_to_the_complex_task_with_lis_context(self):
+        router = FakeRouter()
+        result = vault_ask.consult(LIS_QUESTION, evidence=self.evidence(), router=router)
+        call = router.calls[0]
+        self.assertEqual(call["task"], "complex")
+        self.assertIn(" ".join(LIS_QUESTION.split()), call["user"])  # question COMPLETE
+        self.assertIn("ARCHITECTURE_LIS", call["user"])
+        self.assertIn("llm_router", call["user"])
+        self.assertIn('"openrouter"', call["user"])  # configuration reelle (describe)
+        self.assertTrue(result["lis_context"])
+        self.assertTrue(result["answer"].startswith("1. Garder le retrieval"))
+        # Seules les sources citees par le LLM sont listees.
+        self.assertIn("📚 Sources du Vault citées", result["answer"])
+        self.assertEqual(len(result["sources"]), 1)
+        self.assertLess(len(call["user"]), 8000)  # contexte borne
+
+    def test_non_lis_consultation_gets_no_architecture_context(self):
+        question = ("Analyse les meilleures approches de prospection LinkedIn pour trouver des "
+                    "clients B2B et classe les recommandations par priorite, en tenant compte "
+                    "de ce que j'ai deja sauvegarde sur la recherche de clients avec Claude.")
+        router = FakeRouter("Commence par [1].")
+        vault_ask.consult(question, evidence=self.evidence(question), router=router)
+        self.assertNotIn("ARCHITECTURE_LIS", router.calls[0]["user"])
+
+    def test_manual_notes_are_never_sent_to_the_llm(self):
+        self.conn.execute("UPDATE contents SET description_manual = ? WHERE source_url = ?",
+                          ("NOTE PRIVEE : mon avis perso sur RTK et les tokens",
+                           "https://vm.tiktok.com/rtk/"))
+        self.conn.commit()
+        evidence = self.evidence()
+        self.assertTrue(any("NOTE PRIVEE" in (s.get("snippet") or "")
+                            for s in evidence["sources"]))
+        router = FakeRouter()
+        vault_ask.consult(LIS_QUESTION, evidence=evidence, router=router)
+        self.assertNotIn("NOTE PRIVEE", router.calls[0]["user"])
+
+    def test_without_llm_the_vault_answer_is_returned(self):
+        evidence = self.evidence()
+        for router in (None, FakeRouter(reply=None)):
+            result = vault_ask.consult(LIS_QUESTION, evidence=evidence, router=router)
+            self.assertIn("Analyse complète indisponible", result["answer"])
+            self.assertIn(evidence["answer"], result["answer"])
+            self.assertEqual(result["llm"]["status"], "unavailable")
+
+    def test_openrouter_serves_the_complex_chain_when_gemini_is_absent(self):
+        import uuid
+
+        import _isolation
+        import llm_router as lr
+        from test_llm_router import FakeProvider
+
+        providers = {"local": FakeProvider("local", False),
+                     "gemini": FakeProvider("gemini", True, configured=False),
+                     "openrouter": FakeProvider("openrouter", True),
+                     "mistral": FakeProvider("mistral", True),
+                     "anthropic": FakeProvider("anthropic", True)}
+        router = lr.LLMRouter(providers=providers, breaker=lr.Breaker(clock=lambda: 0.0),
+                              sleep=lambda s: None,
+                              usage_db=_isolation.TMP / f"usage-{uuid.uuid4().hex[:8]}.db")
+        try:
+            result = vault_ask.consult(LIS_QUESTION, evidence=self.evidence(), router=router)
+        finally:
+            router.conn.close()
+        self.assertEqual(result["llm"]["provider"], "openrouter")
+        self.assertEqual(providers["openrouter"].tasks, ["complex"])
+        self.assertEqual(providers["local"].calls, 0)  # pas de Qwen pour une analyse complexe
+        described = json.dumps(router.describe())
+        self.assertNotIn("sk-secret", described)  # configuration, jamais de cle
 
 
 def tearDownModule():
