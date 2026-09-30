@@ -22,7 +22,10 @@ candidat, registre. Qwen ne choisit jamais les agents.
 import json
 import os
 import re
+import shutil
 import socket
+import subprocess
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -138,6 +141,50 @@ class OllamaBackend:
             return self.model in models
         except Exception:  # noqa: BLE001
             return False
+
+    def _reachable(self):
+        try:
+            with urllib.request.urlopen(self.url + "/api/tags", timeout=2):
+                return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _start_local_server(self):
+        """Lance le serveur Ollama LOCAL s'il est installe mais arrete (jamais le cloud)."""
+        exe = shutil.which("ollama") or os.path.join(
+            os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe")
+        if not exe or not os.path.exists(exe):
+            return False
+        flags = 0x08000000 | 0x00000008 if os.name == "nt" else 0  # sans fenetre, detache
+        subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, creationflags=flags)
+        return True
+
+    def warm_up(self):
+        """Charge le modele en memoire (evite l'attente du premier appel)."""
+        request = urllib.request.Request(
+            self.url + "/api/generate",
+            data=json.dumps({"model": self.model, "keep_alive": "30m"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout):
+                return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def ensure_ready(self, *, retries=10, delay=3.0, start=True, sleep=time.sleep):
+        """Test de disponibilite avec relances ; demarre Ollama localement si besoin."""
+        started = False
+        for attempt in range(max(1, retries)):
+            if self.available():
+                self.warm_up()
+                return True
+            if start and not started and not self._reachable():
+                started = self._start_local_server()
+            if attempt < retries - 1:
+                sleep(delay)
+        return False
 
     def chat_json(self, system, user, schema, *, num_predict=260):
         payload = {
@@ -262,7 +309,8 @@ def projects_in_text(conn, text):
     return found
 
 
-def select_for_question(conn, question, *, include=(), exclude=(), replace=None):
+def select_for_question(conn, question, *, include=(), exclude=(), replace=None,
+                        project_ids=()):
     """
     Mode A si des agents sont nommes, sinon mode B : conseillers du projet cite,
     puis routage Agency existant, puis recherche dans le registre. Max 3.
@@ -290,7 +338,8 @@ def select_for_question(conn, question, *, include=(), exclude=(), replace=None)
     if named and not include:
         return "A", chosen
 
-    for pid in projects_in_text(conn, question):
+    for pid in list(project_ids) + [p for p in projects_in_text(conn, question)
+                                    if p not in project_ids]:
         profile = _profile(conn, pid)
         for name in (profile or {}).get("advisors", []):
             add(registry().get(name.casefold()), f"conseiller du projet {profile['project_name']}")
@@ -364,6 +413,24 @@ def _playbook(agent, max_chars=1400):
 
 # ------------------------------------------------------------------ Qwen : hypothese
 
+_INTERNAL_WORDING = re.compile(
+    r"\b(le|ce|du|au) candidat\b(?=\s+(a |a\u0300|présente|presente|propose|identifi|"
+    r"détect|detect|met|montre|concerne|porte|indique|souligne|décrit|decrit|mentionne))",
+    re.IGNORECASE)
+
+
+def user_wording(text):
+    """« Le candidat a identifie... » -> « Une source de ton Vault a identifie... »."""
+    def swap(match):
+        article = match.group(1).lower()
+        replacement = {"le": "une source de ton Vault", "ce": "cette source de ton Vault",
+                       "du": "d'une source de ton Vault", "au": "a une source de ton Vault"}
+        value = replacement[article]
+        return value[0].upper() + value[1:] if match.group(1)[0].isupper() else value
+
+    return _INTERNAL_WORDING.sub(swap, str(text or ""))
+
+
 def build_hypothesis(backend, context):
     system = ("Tu es le Mentor du Life Intelligence System de Rosy. Tu reponds en francais, "
               "uniquement avec le JSON demande, sans inventer : seules les sources fournies "
@@ -384,9 +451,9 @@ def build_hypothesis(backend, context):
     summary = " ".join(str(result.get("summary") or "").split())[:320]
     if not title or not summary:
         return None
-    return {"title": title, "summary": summary,
-            "hypothesis": " ".join(str(result.get("hypothesis") or "").split())[:500],
-            "actions": actions}
+    return {"title": user_wording(title), "summary": user_wording(summary),
+            "hypothesis": user_wording(" ".join(str(result.get("hypothesis") or "").split())[:500]),
+            "actions": [user_wording(a) for a in actions]}
 
 
 # ------------------------------------------------------------------ agents : verdicts
@@ -619,7 +686,7 @@ def review_shortlist(conn, backend, *, now=None, limit=2):
 # ------------------------------------------------------------------ modes A / B (reactif)
 
 def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources, mode,
-                       session_id=None):
+                       session_id=None, context=None):
     """
     Avis des agents choisis (A : un agent nomme ; B : 1 a 3 agents) sur la question,
     fondes sur les sources retrouvees par le Vault. Un seul appel Qwen.
@@ -632,13 +699,19 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
               "uniquement. Chaque avis : 2 a 3 phrases, concret, fonde uniquement sur les "
               "sources du Vault fournies ; si elles ne suffisent pas, dis-le. Aucune action "
               "externe : proposer, jamais executer.")
-    user = json.dumps({
+    payload = {
         "question": question,
         "specialistes": briefs,
         "reponse_du_vault": vault_answer[:1500],
         "sources": [{"ref": f"source:{s.get('source_id')}", "title": s.get("title"),
                      "extrait": (s.get("snippet") or "")[:300]} for s in sources[:4]],
-    }, ensure_ascii=False)
+    }
+    if context:
+        # Contexte actif explicite (suggestion ouverte, message repondu) : il prime.
+        payload["contexte_actif"] = context
+        system += (" Un CONTEXTE ACTIF est fourni : la question porte sur lui ; "
+                   "ne parle pas d'autres sujets.")
+    user = json.dumps(payload, ensure_ascii=False)
     result = backend.chat_json(system, user, PANEL_SCHEMA, num_predict=380)
     if not isinstance(result, dict):
         return None

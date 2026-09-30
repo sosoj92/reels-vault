@@ -587,6 +587,174 @@ def _synthesizer_order():
     return ["local"]
 
 
+_GREETING_RE = re.compile(
+    r"^\s*(bonjour|bonsoir|salut|hello|hey|coucou|yo)\b[\s,!.:;-]*", re.IGNORECASE)
+_POLITE_RE = re.compile(
+    r"\b(s'il te pla[iî]t|s'il vous pla[iî]t|stp|svp|merci)\b[\s,!.]*", re.IGNORECASE)
+_DESCRIBE_RE = re.compile(
+    r"^(que sais[- ]tu|qu'est[- ]ce que tu sais|qu est ce que tu sais|que connais[- ]tu|"
+    r"parle[- ]moi|dis[- ]moi (tout )?(ce que tu sais )?|fais[- ]moi le point|fais le point|"
+    r"o[uù] en est|o[uù] en sont|c'est quoi|qu'est[- ]ce que|infos?|r[ée]sum[ée]|"
+    r"point|rappelle[- ]moi)\b[\s:,]*(de |du |des |d'|sur |le |la |les |l')*",
+    re.IGNORECASE)
+
+
+def clean_question(question):
+    """Retire salutations et formules de politesse : on ne cherche jamais la phrase brute."""
+    text = " ".join(str(question or "").replace("\u2019", "'").split())
+    previous = None
+    while previous != text:
+        previous = text
+        text = _GREETING_RE.sub("", text).strip()
+    text = _POLITE_RE.sub("", text).strip(" ,")
+    return text or " ".join(str(question or "").split())
+
+
+def project_intent(conn, question):
+    """
+    Intention describe_project : « que sais-tu de Nexdoor Talent ? », « ou en est X ? »,
+    ou le nom seul d'un projet connu. Retourne l'id du projet, sinon None.
+    """
+    cleaned = clean_question(question).strip(" ?!.")
+    stripped = _DESCRIBE_RE.sub("", cleaned).strip(" ?!.")
+    describing = stripped != cleaned
+    try:
+        import mentor_council
+
+        projects = mentor_council.projects_in_text(conn, stripped or cleaned)
+    except Exception:  # noqa: BLE001 - profils absents : pas de route projet
+        return None
+    if len(projects) != 1:
+        return None
+    if describing:
+        return projects[0]
+    # Nom seul (ou presque) : « Nexdoor Talent ? »
+    import mentor_project_links as links
+
+    names = links.load_projects(conn)[projects[0]]["profile"]["names"]
+    from vault_db import fold
+
+    return projects[0] if fold(stripped) in names else None
+
+
+def _rows(conn, sql, params=()):
+    try:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    except sqlite3.Error:
+        return []
+
+
+def project_view(conn, project_id):
+    """Ce que le Vault sait reellement d'un projet (aucune generation)."""
+    entity = _rows(conn, "SELECT id, entity_type, name, attention_status FROM "
+                         "intelligence_entities WHERE id = ?", (project_id,))
+    if not entity:
+        return None
+    view = {"entity": entity[0]}
+    binding = _rows(conn, "SELECT canonical_path, parent_entity_id, notion_url, drive_url "
+                          "FROM intelligence_entity_bindings WHERE entity_id = ?", (project_id,))
+    view["binding"] = binding[0] if binding else None
+    try:
+        import mentor_project_profiles as profiles
+
+        view["profile"] = profiles.get_profile(conn, project_id)
+    except Exception:  # noqa: BLE001
+        view["profile"] = None
+    view["sources"] = _rows(conn, """
+        SELECT s.id AS source_id, s.title, s.source_url AS url, s.author, es.role, es.notes,
+               c.id AS content_id, COALESCE(c.description_manual, c.description_original,
+               c.description_ai, '') AS snippet
+          FROM intelligence_entity_sources es
+          JOIN intelligence_sources s ON s.id = es.source_id
+          LEFT JOIN contents c ON c.id = s.content_id
+         WHERE es.entity_id = ? AND es.role <> 'primary'
+         ORDER BY s.id""", (project_id,))
+    source_ids = [s["source_id"] for s in view["sources"]]
+    marks = ",".join("?" for _ in source_ids) or "NULL"
+    view["insights"] = _rows(conn, f"SELECT id, source_id, insight_type, observation, "
+                                   f"relevance_score, status FROM "
+                                   f"intelligence_mentor_insights_local WHERE source_id IN "
+                                   f"({marks}) ORDER BY relevance_score DESC", source_ids)
+    view["suggestions"] = _rows(conn, "SELECT suggestion_id, title, summary, status FROM "
+                                      "mentor_suggestions WHERE project_id = ? "
+                                      "ORDER BY created_at", (project_id,))
+    content_ids = [s["content_id"] for s in view["sources"] if s.get("content_id")]
+    cmarks = ",".join("?" for _ in content_ids) or "NULL"
+    view["tasks"] = _rows(conn, f"SELECT id, title, status, due_date FROM actions WHERE "
+                                f"content_id IN ({cmarks}) AND status NOT IN "
+                                f"('dismissed', 'archived') ORDER BY id", content_ids)
+    view["pending_links"] = _rows(conn, "SELECT proposal_id, source_id, confidence_level "
+                                        "FROM mentor_project_link_proposals WHERE entity_id = ? "
+                                        "AND status = 'proposed' AND confidence_level IN "
+                                        "('high', 'medium')", (project_id,))
+    return view
+
+
+def render_project_view(view):
+    entity = view["entity"]
+    profile = view.get("profile") or {}
+    binding = view.get("binding") or {}
+    lines = [f"📁 {entity['name']} ({entity['entity_type']})"]
+    if binding.get("canonical_path") and binding["canonical_path"] != entity["name"]:
+        lines.append(f"Place : {binding['canonical_path']}")
+    if profile.get("description"):
+        lines.append(f"Description (profil) : {profile['description']}")
+    topics = [t["topic"] for t in profile.get("core_topics") or []][:8]
+    if topics:
+        lines.append("Sujets suivis : " + ", ".join(topics))
+    if profile and profile.get("profile_status") != "complete":
+        lines.append("Profil incomplet.")
+    lines.append("")
+    if view["sources"]:
+        lines.append(f"Sources rattachees ({len(view['sources'])}) :")
+        for source in view["sources"][:6]:
+            how = "validee par toi" if source["role"] == "relevant_to" else "mention"
+            lines.append(f"• {_clean_title(source['title'])} (source {source['source_id']}, {how})")
+    else:
+        lines.append("Aucune source rattachee a ce projet pour l'instant.")
+    for insight in view["insights"][:3]:
+        lines.append(f"• Insight {insight['insight_type']} ({insight['relevance_score']:.2f}) : "
+                     f"{_cut(_clean_text(insight['observation']), 160)}")
+    if view["suggestions"]:
+        lines.append("")
+        lines.append("Suggestions du Mentor :")
+        for suggestion in view["suggestions"]:
+            lines.append(f"• {suggestion['suggestion_id']} — {suggestion['title']} "
+                         f"({suggestion['status']})")
+    if view["tasks"]:
+        lines.append("")
+        lines.append("Taches liees :")
+        for task in view["tasks"]:
+            lines.append(f"• #{task['id']} {task['title']} ({task['status']})")
+    if view["pending_links"]:
+        lines.append("")
+        lines.append(f"{len(view['pending_links'])} rattachement(s) propose(s) en attente "
+                     "de ta validation.")
+    lines.append("")
+    lines.append("Uniquement ce qui est enregistre dans ton Vault.")
+    return "\n".join(lines)
+
+
+def describe_project(conn, question, project_id):
+    started = time.perf_counter()
+    view = project_view(conn, project_id)
+    if view is None:
+        return None
+    sources = [{"source_id": s["source_id"], "content_id": s.get("content_id"),
+                "title": s["title"], "url": s["url"], "author": s.get("author"),
+                "snippet": _cut(_clean_text(s.get("snippet")), 300)} for s in view["sources"]]
+    return {
+        "question": question, "mode": "project", "route": "project_view",
+        "project_id": project_id, "answer": render_project_view(view),
+        "sources": sources, "related_sources": [], "retrieval": {"route": "project_view"},
+        "assessments": [], "linked_entities": [view["entity"]["name"]], "agents": [],
+        "routes": ["project_view"], "sensitive": False, "capabilities": None,
+        "llm": {"status": "not_needed", "used": False},
+        "timing_ms": {"retrieval": 0,
+                      "total": round((time.perf_counter() - started) * 1000)},
+    }
+
+
 def ask(conn, question, *, mode="ask", agent=None, llm="auto",
         llm_timeout=DEFAULT_LLM_TIMEOUT, max_sources=MAX_SOURCES,
         semantic="auto", semantic_backend=None):
@@ -602,8 +770,15 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
     if not question:
         raise ValueError("question is required")
 
+    # Question sur un projet connu : vue projet construite depuis le Vault.
+    project_id = project_intent(conn, question)
+    if project_id is not None:
+        described = describe_project(conn, question, project_id)
+        if described is not None:
+            return described
+
     pack = context_layer.build_context_pack(
-        conn, question, direct_source_limit=max(max_sources * 2, 8),
+        conn, clean_question(question), direct_source_limit=max(max_sources * 2, 8),
         semantic=semantic, semantic_backend=semantic_backend,
     )
     lexical = [

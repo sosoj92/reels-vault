@@ -44,6 +44,13 @@ SESSION_MINUTES = 30
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 MENTOR_PHRASES = ("qu'est-ce que tu as pour moi", "qu est ce que tu as pour moi",
                   "quoi de neuf mentor", "/mentor")
+# Expressions qui renvoient au contexte actif (« ca », « qu'en penses-tu »...).
+ANAPHORA_RE = re.compile(
+    r"(?<![a-z])(ca|ceci|cela|ce contenu|cette idee|cette suggestion|cette source|cette piste|"
+    r"ce sujet|la dessus|la-dessus|qu'en penses|qu en penses|qu'en pense|qu en pense|"
+    r"ce qu'il en pense|ce qu'elle en pense|ce qu'il pense|ce qu'elle pense|ton avis|"
+    r"son avis|comment exploiter|comment l'exploiter|developpe|detaille)(?![a-z])")
+ACTIVE_CONTEXT_MINUTES = 60
 ADVICE_MARKERS = ("comment exploiter", "qu'en pense", "que pense", "ton avis", "conseil",
                   "strategie", "idee pour", "comment utiliser", "demande a", "demande au",
                   "demande aux", "que ferait")
@@ -177,6 +184,44 @@ class Gateway:
         ).fetchone()
         return self.context_of(row[0]) if row else None
 
+    # -------------------------------------------------------------- contexte actif
+    def set_active(self, kind, **data):
+        import mentor_proactive_store as store
+
+        self.set_state("active_context", json.dumps(
+            {"kind": kind, "at": store.now_iso(), **data}, ensure_ascii=False))
+
+    def active(self):
+        raw = self.state("active_context")
+        if not raw:
+            return None
+        item = json.loads(raw)
+        at = datetime.fromisoformat(item["at"])
+        if now_utc() - at > timedelta(minutes=ACTIVE_CONTEXT_MINUTES):
+            return None
+        return item
+
+    def resolve_context(self, text, reply_context):
+        """
+        Priorite : 1. message auquel Rosy repond ; 2. suggestion ouverte / derniere
+        consultee ; 3. dernier contenu discute ; 4. sinon retrieval classique (None).
+        Le contexte actif n'est utilise que si la phrase y renvoie (« ca »...).
+        """
+        if reply_context:
+            if reply_context.get("suggestion_id"):
+                return {"kind": "suggestion", "suggestion_id": reply_context["suggestion_id"],
+                        "why": "message repondu"}
+            sources = (reply_context.get("payload") or {}).get("sources") or []
+            if sources:
+                return {"kind": "sources", "source_ids": sources,
+                        "question": reply_context.get("question"), "why": "message repondu"}
+        if not refers_to_context(text):
+            return None
+        active = self.active()
+        if not active:
+            return None
+        return {**active, "why": "contexte actif"}
+
     # -------------------------------------------------------------- securite
     def authorized(self, user_id, chat_id):
         return bool(self.allowed_user and self.allowed_chat) \
@@ -251,8 +296,8 @@ class Gateway:
             if base:
                 return self.answer(base["question"], adjustment=adjustment, base=base,
                                    reply_to=message_id)
-        suggestion_id = context["suggestion_id"] if context else None
-        return self.answer(text, suggestion_id=suggestion_id, reply_to=message_id)
+        anchor = self.resolve_context(text, context)
+        return self.answer(text, anchor=anchor, reply_to=message_id)
 
     def pause_command(self, folded):
         import mentor_delivery as delivery
@@ -300,23 +345,17 @@ class Gateway:
         return "inbox"
 
     # -------------------------------------------------------------- questions
-    def answer(self, question, *, suggestion_id=None, adjustment=None, base=None,
-               reply_to=None):
+    def answer(self, question, *, anchor=None, adjustment=None, base=None, reply_to=None):
         import mentor_council as council
 
         try:
             self.client.send_chat_action(self.chat_id)
         except telegram_api.TelegramError:
             pass
-        full_question = question
-        suggestion = None
-        if suggestion_id:
-            import mentor_proactive_store as store
-
-            suggestion = store.get_suggestion(self.conn, suggestion_id)
-            if suggestion:
-                full_question = (f"{question}\n(Contexte : suggestion {suggestion_id} - "
-                                 f"{suggestion['title']}. {suggestion['summary']})")
+        if adjustment and base and not anchor:
+            anchor = base.get("payload", {}).get("anchor")
+        grounded = self.grounding(anchor) if anchor else None
+        project_ids = [grounded["project_id"]] if grounded and grounded.get("project_id") else []
 
         if adjustment:
             prior = base.get("agents") or []
@@ -325,6 +364,7 @@ class Gateway:
                 include=adjustment.get("include", ()),
                 exclude=adjustment.get("exclude", ()),
                 replace=adjustment.get("replace"),
+                project_ids=project_ids,
             )
             if not adjustment.get("replace"):
                 kept = [a for a in prior if a.casefold() not in
@@ -337,36 +377,106 @@ class Gateway:
             wants_agents = any(marker in fold(question) for marker in ADVICE_MARKERS) \
                 or bool(council.agents_in_text(question)) \
                 or bool(council.projects_in_text(self.conn, question)) \
-                or suggestion is not None
-            mode, agents = council.select_for_question(self.conn, question) \
-                if wants_agents else (None, [])
+                or grounded is not None
+            mode, agents = council.select_for_question(
+                self.conn, question, project_ids=project_ids) if wants_agents else (None, [])
 
-        result = self._ask(full_question, llm="off" if agents else "auto")
+        if grounded:
+            # Contexte explicite : aucune recherche parasite, les agents recoivent ce contexte.
+            result = {"answer": grounded["text"], "sources": grounded["sources"]}
+        else:
+            result = self._ask(question, llm="off" if agents else "auto")
         lines = [result["answer"]]
         panel = None
         if agents:
-            panel = council.answer_with_agents(
-                self.conn, self.backend, question, agents, vault_answer=result["answer"],
-                sources=result["sources"], mode=mode or "B",
-                session_id=f"telegram:{self.chat_id}",
-            )
+            ready = self.backend is not None and (
+                self.backend.available()
+                or getattr(self.backend, "ensure_ready", lambda **k: False)(
+                    retries=2, delay=2, start=False))
+            if ready:
+                panel = council.answer_with_agents(
+                    self.conn, self.backend, question, agents, vault_answer=result["answer"],
+                    sources=result["sources"], mode=mode or "B",
+                    session_id=f"telegram:{self.chat_id}",
+                    context=grounded["agent_context"] if grounded else None,
+                )
             lines.append("")
-            lines.append("🤝 Agents consultes (mode " + (mode or "B") + ") :")
+            if panel and panel["opinions"]:
+                lines.append("🤝 Agents consultes (mode " + (mode or "B") + ") :")
+            else:
+                why = "Qwen local indisponible" if not ready else "reponse de Qwen inexploitable"
+                lines.append(f"🤝 Agents selectionnes mais non consultes : {why}.")
             for agent in agents:
                 lines.append(f"• {agent['name']} — {agent['reason']}")
-            if panel:
+            if panel and panel["opinions"]:
                 for opinion in panel["opinions"]:
                     lines.append(f"\n{opinion['agent']} : {opinion['opinion']}")
                 if panel.get("synthesis"):
                     lines.append(f"\nSynthese (Qwen local, a verifier) : {panel['synthesis']}")
-            else:
-                lines.append("(Avis des agents indisponibles : Qwen local injoignable.)")
         message_id = self.send("\n".join(lines), reply_to=reply_to)
+        source_ids = [s.get("source_id") for s in result["sources"] if s.get("source_id")]
+        suggestion_id = grounded.get("suggestion_id") if grounded else None
         self.remember(message_id, "answer", suggestion_id=suggestion_id, question=question,
                       agents=[a["name"] for a in agents], mode=mode,
-                      payload={"sources": [s.get("source_id") for s in result["sources"]]})
-        self._publish_question(question, result["sources"])
-        return f"answer:{mode or 'ask'}"
+                      payload={"sources": source_ids, "anchor": anchor})
+        if suggestion_id:
+            self.set_active("suggestion", suggestion_id=suggestion_id)
+        elif source_ids:
+            self.set_active("sources", source_ids=source_ids, question=question)
+        if not grounded:
+            self._publish_question(question, result["sources"])
+        return f"answer:{mode or 'ask'}" + (":anchored" if grounded else "")
+
+    def grounding(self, anchor):
+        """Contexte explicite -> texte, sources et contexte complet transmis aux agents."""
+        import mentor_council as council
+        import mentor_proactive_store as store
+
+        if anchor.get("kind") == "suggestion":
+            suggestion = store.get_suggestion(self.conn, anchor["suggestion_id"])
+            if suggestion is None:
+                return None
+            evidence = suggestion["evidence"]
+            project = (evidence.get("project") or {}).get("name") or \
+                _project_name(self.conn, suggestion.get("project_id"))
+            sources = [{"source_id": int(src["ref"].split(":")[1]), "title": src.get("title"),
+                        "snippet": src.get("excerpt"), "url": src.get("url")}
+                       for src in evidence.get("sources") or [] if src.get("ref")]
+            text = (f"📌 Contexte : {suggestion['suggestion_id']} — {suggestion['title']} "
+                    f"({project})\n{suggestion['summary']}")
+            return {
+                "suggestion_id": suggestion["suggestion_id"],
+                "project_id": suggestion.get("project_id"),
+                "text": text,
+                "sources": sources,
+                "agent_context": {
+                    "suggestion": suggestion["suggestion_id"],
+                    "titre": suggestion["title"],
+                    "resume": suggestion["summary"],
+                    "projet": project,
+                    "hypothese": evidence.get("hypothesis"),
+                    "preuves": evidence.get("candidate"),
+                    "sources": evidence.get("sources"),
+                    "verdicts_existants": [
+                        {k: a.get(k) for k in ("agent", "value_score", "verdict",
+                                               "proposed_action", "main_objection")}
+                        for a in evidence.get("agents") or []],
+                    "actions_proposees": evidence.get("actions"),
+                },
+            }
+        if anchor.get("kind") == "sources":
+            briefs = [b for b in (council._source_brief(self.conn, sid)
+                                  for sid in anchor.get("source_ids") or []) if b]
+            if not briefs:
+                return None
+            sources = [{"source_id": int(b["ref"].split(":")[1]), "title": b["title"],
+                        "snippet": b["excerpt"], "url": b["url"]} for b in briefs]
+            titles = "; ".join(b["title"] or b["ref"] for b in briefs[:3])
+            return {"project_id": None, "sources": sources,
+                    "text": f"📌 Contexte : {titles}",
+                    "agent_context": {"question_precedente": anchor.get("question"),
+                                      "sources": briefs}}
+        return None
 
     def _ask(self, question, llm):
         if self.ask_fn:
@@ -524,6 +634,7 @@ class Gateway:
                                           suggestion_ids=[sid], chat_id=self.chat_id,
                                           message_id=detail_id)
                 self.remember(detail_id, "detail", suggestion_id=sid)
+                self.set_active("suggestion", suggestion_id=sid)
             elif action == "later" and not arg:
                 self.client.edit_message(self.chat_id, message_id, message.get("text", ""),
                                          buttons=[[{"text": label, "callback_data":
@@ -656,6 +767,24 @@ def _project_name(conn, project_id):
     return row[0] if row else f"Projet #{project_id}"
 
 
+def refers_to_context(text):
+    """La phrase renvoie-t-elle au contexte (« ca », « qu'en penses-tu »...) ?"""
+    import mentor_council as council
+
+    folded = fold(text)
+    if ANAPHORA_RE.search(folded):
+        return True
+    # « Demande au CFO » seul, sans autre sujet : il parle du contexte en cours.
+    rest = folded
+    for agent in council.agents_in_text(text):
+        rest = rest.replace(fold(agent.name), " ")
+    for alias in council.AGENT_ALIASES:
+        rest = re.sub(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", " ", rest)
+    rest = re.sub(r"(?<![a-z])(demande|demander|au|a|aux|le|la|les|du|de|et|stp|svp|"
+                  r"merci|ce|qu|il|elle|en|pense|penses|avis)(?![a-z])", " ", rest)
+    return len(re.sub(r"[^a-z]+", "", rest)) == 0
+
+
 def parse_adjustment(text):
     """« ajoute le CFO », « sans le Growth Hacker », « demande plutot au Recruitment Agent »."""
     import mentor_council as council
@@ -733,8 +862,11 @@ def build(db=DEFAULT_DB):
     from vault_notion_cockpit import NotionCockpitClient
 
     conn = connect(str(db))
+    backend = mentor_council.OllamaBackend()
+    ready = backend.ensure_ready(retries=10, delay=3, start=True)
+    log.info("Qwen local %s", "pret" if ready else "indisponible (aucun repli cloud)")
     return Gateway(conn, telegram_api.TelegramClient(token), allowed_user=user,
-                   allowed_chat=chat, backend=mentor_council.OllamaBackend(),
+                   allowed_chat=chat, backend=backend,
                    notion=NotionCockpitClient(), notion_tasks=mentor_delivery.tasks_client())
 
 

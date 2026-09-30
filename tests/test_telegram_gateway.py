@@ -104,11 +104,14 @@ class SecurityTests(GatewayCase):
         env = {"TELEGRAM_BOT_TOKEN": "1:x", "TELEGRAM_ALLOWED_USER_ID": "1",
                "TELEGRAM_ALLOWED_CHAT_ID": "1", "VAULT_ASK_SYNTHESIZER": "auto"}
         with mock.patch.dict("os.environ", env), mock.patch.object(telegram_api, "load_env"), \
-                mock.patch.object(tg, "LOG_DIR", _isolation.TMP / "logs"):
+                mock.patch.object(tg, "LOG_DIR", _isolation.TMP / "logs"), \
+                mock.patch.object(council.OllamaBackend, "ensure_ready",
+                                  return_value=False) as ready:
             gateway = tg.build(self.path)
             import os
 
             self.assertEqual(os.environ["VAULT_ASK_SYNTHESIZER"], "local")
+            ready.assert_called_once()  # test de disponibilite de Qwen au demarrage
             gateway.conn.close()
 
 
@@ -252,17 +255,19 @@ class ProactiveTests(GatewayCase):
         self.assertEqual(store.get_suggestion(self.conn, other)["status"], "dismissed")
 
     def test_reply_to_a_suggestion_keeps_its_context(self):
-        seen = {}
+        asked = []
 
         def spy(conn, question, llm="off"):
-            seen["question"] = question
-            return real_ask(conn, "sourcing de profils data", llm)
+            asked.append(question)
+            return real_ask(conn, question, llm)
 
         self.gw.ask_fn = spy
         sid = self.sug["opportunity"]["suggestion_id"]
-        self.gw.handle_update(msg("Tu peux developper ?", reply_to=self.push["message_id"],
-                                  message_id=40))
-        self.assertIn(sid, seen["question"])
+        result = self.gw.handle_update(msg("Tu peux developper ?",
+                                           reply_to=self.push["message_id"], message_id=40))
+        self.assertTrue(result.endswith(":anchored"))
+        self.assertEqual(asked, [])  # contexte explicite : pas de recherche parasite
+        self.assertIn(f"📌 Contexte : {sid}", self.last()["text"])
         self.assertIn("Agents consultes", self.last()["text"])
 
     def test_pause_until_monday_blocks_pushes_but_mentor_keeps_observing(self):

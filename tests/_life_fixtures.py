@@ -87,12 +87,17 @@ class FakeBackend:
         self.hypothesis = hypothesis
         self.panel = panel
         self.calls = []
+        self.prompts = []
 
     def available(self):
         return self._available
 
+    def ensure_ready(self, **kwargs):
+        return self._available
+
     def chat_json(self, system, user, schema, *, num_predict=260):
         self.calls.append(schema)
+        self.prompts.append((schema, user))
         if schema is mentor_council.HYPOTHESIS_SCHEMA:
             if not self.hypothesis:
                 return None
