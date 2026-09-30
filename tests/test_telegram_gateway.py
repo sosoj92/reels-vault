@@ -105,12 +105,12 @@ class SecurityTests(GatewayCase):
                "TELEGRAM_ALLOWED_CHAT_ID": "1", "VAULT_ASK_SYNTHESIZER": "auto"}
         with mock.patch.dict("os.environ", env), mock.patch.object(telegram_api, "load_env"), \
                 mock.patch.object(tg, "LOG_DIR", _isolation.TMP / "logs"), \
-                mock.patch.object(council.OllamaBackend, "ensure_ready",
-                                  return_value=False) as ready:
+                mock.patch("llm_router.LLMRouter.ensure_ready",
+                           return_value=False) as ready:
             gateway = tg.build(self.path)
             import os
 
-            self.assertEqual(os.environ["VAULT_ASK_SYNTHESIZER"], "local")
+            self.assertEqual(os.environ["VAULT_ASK_SYNTHESIZER"], "router")
             ready.assert_called_once()  # test de disponibilite de Qwen au demarrage
             gateway.conn.close()
 

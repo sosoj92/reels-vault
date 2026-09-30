@@ -528,10 +528,35 @@ def synthesize_cloud(question, sources, agents, timeout):
     return (_cut(_complete_sentences(text), 700) if text else None), info
 
 
+def synthesize_router(question, sources, agents, timeout):
+    """
+    Synthese via le routeur LLM central (llm_router) : il choisit Qwen local,
+    Mistral ou rien selon la politique, la charge du PC, le budget et la
+    confidentialite. Seuls des extraits publics des sources sont transmis.
+    """
+    import llm_router
+
+    router = llm_router.shared()
+    system, user = _synthesis_prompt(question, public_only(sources), agents)
+    started = time.perf_counter()
+    text = router.complete_text(system, user, max_tokens=180, task="light",
+                                purpose="ask_synthesis")
+    last = router.last or {}
+    info = {"status": "ok" if text else "unavailable", "provider": last.get("provider"),
+            "model": last.get("model"), "elapsed_s": round(time.perf_counter() - started, 1)}
+    if text:
+        labels = {"local": "locale (Qwen)", "mistral": "Mistral", "anthropic": "Claude"}
+        info["label"] = labels.get(last.get("provider"), last.get("provider") or "LLM")
+        return _cut(_complete_sentences(" ".join(text.split())), 700), info
+    info["reason"] = last.get("reason")
+    return None, info
+
+
 # Point d'extension : chaque synthetiseur a la meme signature
 # (question, sources, agents, timeout) -> (texte | None, info).
 # "local" = Qwen via Ollama ; "cloud" = vault_cloud (Claude aujourd'hui).
 SYNTHESIZERS = {
+    "router": synthesize_router,
     "local": synthesize_local,
     "cloud": synthesize_cloud,
 }
@@ -579,7 +604,9 @@ def _synthesizer_order():
     - "auto"  : local, puis cloud si le local est absent ou trop lent.
     La reponse deterministe citee ne depend d'aucun de ces choix.
     """
-    choice = os.environ.get("VAULT_ASK_SYNTHESIZER", "local").strip().lower()
+    choice = os.environ.get("VAULT_ASK_SYNTHESIZER", "router").strip().lower()
+    if choice == "router":
+        return ["router"]
     if choice == "cloud":
         return ["cloud"]
     if choice == "auto":

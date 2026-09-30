@@ -89,15 +89,32 @@ class FakeBackend:
         self.calls = []
         self.prompts = []
 
-    def available(self):
+    def available(self, *args, **kwargs):
         return self._available
 
     def ensure_ready(self, **kwargs):
         return self._available
 
-    def chat_json(self, system, user, schema, *, num_predict=260):
+    def chat_json(self, system, user, schema, *, num_predict=260, **routing):
         self.calls.append(schema)
         self.prompts.append((schema, user))
+        self.routing = routing
+        import vault_ingestion
+
+        if schema is vault_ingestion.CLASSIFY_SCHEMA:
+            if not self._available:
+                return None
+            return getattr(self, "classification", None) or {
+                "category": "Business & Marketing",
+                "subthemes": ["Prospection & génération de leads", "Sous-theme invente"],
+                "tags": ["sourcing", "recrutement"], "summary": "Resume du contenu.",
+                "tools": ["Manatal", "Outil Imaginaire"]}
+        if schema is mentor_council.VERDICTS_PANEL_SCHEMA:
+            # Un seul appel pour tous les agents : un verdict scripte par agent, dans l'ordre.
+            names = [s["agent"] for s in json.loads(user)["specialistes"]]
+            return {"verdicts": [{"agent": name,
+                                  **(self.verdicts.pop(0) if self.verdicts else verdict())}
+                                 for name in names]}
         if schema is mentor_council.HYPOTHESIS_SCHEMA:
             if not self.hypothesis:
                 return None
@@ -146,6 +163,11 @@ class FakeTelegram:
 
     def edit_message(self, chat_id, message_id, text, *, buttons=None):
         self.edits.append({"message_id": message_id, "text": text, "buttons": buttons})
+        for sent in self.sent:  # Telegram affiche le texte modifie a la place de l'ancien
+            if sent["message_id"] == message_id:
+                sent["text"] = text
+                if buttons is not None:
+                    sent["buttons"] = buttons
         return {}
 
     def answer_callback(self, callback_id, text=None):

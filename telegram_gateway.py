@@ -34,7 +34,8 @@ import telegram_api
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "vault.db"
-INBOX = ROOT / "mobile-inbox" / "inbox.txt"
+INBOX = ROOT / "mobile-inbox" / "inbox.txt"          # file video du pipeline existant
+TELEGRAM_FILES = ROOT / "inbox" / "telegram"            # fichiers recus par Telegram (local)
 LOG_DIR = ROOT / "logs"
 LOCK_FILE = LOG_DIR / "telegram_gateway.lock"
 TICK_SECONDS = 60
@@ -255,6 +256,17 @@ class Gateway:
         reply_to = (message.get("reply_to_message") or {}).get("message_id")
         text = (message.get("text") or message.get("caption") or "").strip()
         voice = message.get("voice") or message.get("audio")
+        document = message.get("document")
+        photos = message.get("photo") or []
+        if document or photos:
+            return self.receive_file(message, document, photos, caption=text)
+        if fold(text).startswith("/save"):
+            replied = message.get("reply_to_message") or {}
+            target = (replied.get("text") or replied.get("caption") or "").strip()
+            if not target:
+                self.send("Reponds a un message avec /save pour l'ajouter au Vault.")
+                return "save_missing"
+            return self.save_text(target, message.get("message_id"))
         if voice:
             try:
                 data = self.client.download_file(voice["file_id"])
@@ -265,6 +277,10 @@ class Gateway:
                           "indisponible). Tu peux me l'ecrire ?")
                 return "voice_failed"
             self.send(f"🎙️ « {text} »")
+            import vault_ingestion as ingestion
+
+            if ingestion.wants_to_save(text):
+                return self.save_text(text, message.get("message_id"), source_type="voice")
         if not text:
             return "empty"
         return self.on_text(text, reply_to=reply_to, message_id=message.get("message_id"))
@@ -283,12 +299,25 @@ class Gateway:
             return self.show_pending()
         if folded.startswith("/status"):
             return self.show_status()
+        if folded.startswith("/inbox"):
+            return self.show_inbox()
+        if folded.startswith("/project"):
+            return self.attach_project(text, context)
         paused = self.pause_command(folded)
         if paused:
             return paused
         urls = URL_RE.findall(text)
-        if urls and len(URL_RE.sub("", text).strip()) < 4:
-            return self.add_to_inbox(urls)
+        if urls:
+            rest = URL_RE.sub("", text).strip()
+            import vault_ingestion as ingestion
+
+            if len(rest) < 4 or ingestion.wants_to_save(rest) or \
+                    __import__("mentor_council").projects_in_text(self.conn, rest):
+                return self.save_urls(urls, rest, message_id)
+        import vault_ingestion as ingestion
+
+        if ingestion.wants_to_save(text):
+            return self.save_text(text, message_id)
 
         adjustment = parse_adjustment(text)
         if adjustment and (context or self.last_answer()):
@@ -334,15 +363,143 @@ class Gateway:
         return moment.astimezone(self.tz).strftime("%a %d/%m %H:%M") if self.tz \
             else moment.astimezone().strftime("%a %d/%m %H:%M")
 
-    def add_to_inbox(self, urls):
-        # Seule ecriture fichier possible : l'inbox existante, lue par l'ingestion planifiee.
-        self.inbox.parent.mkdir(parents=True, exist_ok=True)
-        with self.inbox.open("a", encoding="utf-8") as handle:
-            for url in urls:
-                handle.write(url.strip() + "\n")
-        self.send(f"📥 {len(urls)} lien(s) ajoute(s) a l'inbox : ingestion au prochain passage "
-                  "planifie.")
+    # -------------------------------------------------------------- ingestion
+    def _router(self):
+        return self.backend if hasattr(self.backend, "chat_json") else None
+
+    def save_urls(self, urls, note, message_id):
+        import vault_ingestion as ingestion
+
+        results = []
+        for index, url in enumerate(urls):
+            key = f"{message_id}:{index}" if message_id is not None else None
+            results.append(ingestion.ingest_url(
+                self.conn, url, channel="telegram", telegram_message_id=key, note=note,
+                video_queue=self.inbox, router=self._router()))
+        for result in results:
+            self.confirm_ingestion(result)
         return "inbox"
+
+    def save_text(self, text, message_id, source_type="note"):
+        import vault_ingestion as ingestion
+
+        result = ingestion.ingest_note(self.conn, text, channel="telegram",
+                                       telegram_message_id=None if message_id is None
+                                       else str(message_id), source_type=source_type,
+                                       router=self._router())
+        self.confirm_ingestion(result)
+        return f"saved:{result['status']}"
+
+    def receive_file(self, message, document, photos, caption=""):
+        import vault_ingestion as ingestion
+
+        if document:
+            file_id, name = document["file_id"], document.get("file_name") or "document"
+        else:
+            best = max(photos, key=lambda p: p.get("file_size") or 0)
+            file_id, name = best["file_id"], f"photo-{message.get('message_id')}.jpg"
+        try:
+            data = self.client.download_file(file_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fichier non telecharge : %s", type(exc).__name__)
+            self.send("📎 Je n'ai pas pu recuperer ce fichier (trop gros ?). Depose-le dans "
+                      "inbox\\files sur le PC.")
+            return "file_failed"
+        folder = TELEGRAM_FILES / datetime.now().strftime("%Y-%m-%d")
+        folder.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", Path(name).name)[:120] or "fichier"
+        target = folder / f"{message.get('message_id')}-{safe}"
+        target.write_bytes(data)
+        result = ingestion.ingest_file(self.conn, target, channel="telegram",
+                                       original_filename=name, caption=caption or None,
+                                       telegram_message_id=str(message.get("message_id")),
+                                       router=self._router())
+        self.confirm_ingestion(result)
+        return f"file:{result['status']}"
+
+    def confirm_ingestion(self, result):
+        status = result.get("status")
+        if status == "rejected_secret":
+            self.send("⚠️ Ce contenu semble contenir un secret (mot de passe, cle, IBAN…). Je ne "
+                      "l'enregistre pas et ne l'envoie a aucune IA. Pense a le supprimer de "
+                      "Telegram.")
+            return None
+        if status == "duplicate":
+            self.send("♻️ Deja dans ton Vault.")
+            return None
+        if status == "queued_video":
+            lines = ["✅ Ajoute au Vault", "🎬 Video (transcription et analyse au prochain "
+                                           "passage)"]
+            if result.get("project"):
+                lines.append(f"💼 {result['project']}")
+            message_id = self.send("\n".join(lines))
+            self.remember(message_id, "ingestion", payload={"item_id": result.get("item_id")})
+            return message_id
+        labels = {"article": "📰 Article", "note": "📝 Note", "voice": "🎙️ Note vocale",
+                  "pdf": "📄 PDF", "document": "📄 Document", "image": "🖼️ Image",
+                  "file": "📎 Fichier"}
+        lines = ["✅ Ajoute au Vault", labels.get(result.get("kind"), "📎 Contenu")]
+        classification = result.get("classification") or {}
+        themes = [t for t in [classification.get("category")] + classification.get("subthemes", [])
+                  if t]
+        if themes:
+            lines.append("🧠 " + ", ".join(themes[:3]))
+        if classification.get("tools"):
+            lines.append("🛠️ " + ", ".join(classification["tools"][:5]))
+        if result.get("project"):
+            lines.append(f"💼 {result['project']}")
+        elif result.get("proposed_project"):
+            lines.append(f"💼 propose : {result['proposed_project']} (a valider)")
+        if not classification:
+            lines.append("⏳ Classement en attente (moteur LLM indisponible)")
+        if result.get("sensitivity") == "sensitive":
+            lines.append("🔒 Sensible : classe en local uniquement. La prochaine fois, depose "
+                         "plutot ce type de contenu dans inbox\\sensitive sur le PC.")
+        message_id = self.send("\n".join(lines))
+        self.remember(message_id, "ingestion", payload={
+            "item_id": result.get("item_id"), "source_id": result.get("source_id")})
+        if result.get("source_id"):
+            self.set_active("sources", source_ids=[result["source_id"]], question=None)
+            self.set_state("last_ingestion", json.dumps({"source_id": result["source_id"],
+                                                         "item_id": result.get("item_id")}))
+        return message_id
+
+    def show_inbox(self):
+        import vault_ingestion as ingestion
+
+        items = ingestion.recent(self.conn, limit=10)
+        if not items:
+            self.send("📥 Rien d'ajoute recemment.")
+            return "inbox:0"
+        icons = {"url_video": "🎬", "url_article": "📰", "note": "📝", "pdf": "📄",
+                 "document": "📄", "image": "🖼️", "file": "📎"}
+        lines = ["📥 Derniers ajouts :"]
+        for item in items:
+            title = item.get("title") or item.get("original_filename") or item.get("original_url")
+            lines.append(f"{icons.get(item['kind'], '•')} {str(title)[:70]} — {item['status']}")
+        self.send("\n".join(lines))
+        return f"inbox:{len(items)}"
+
+    def attach_project(self, text, context):
+        import mentor_council as council
+        import mentor_project_links as links
+
+        name = re.sub(r"^/project(@\w+)?", "", text, flags=re.I).strip()
+        projects = council.projects_in_text(self.conn, name)
+        target = None
+        if context and context.get("kind") == "ingestion":
+            target = context["payload"].get("source_id")
+        if target is None:
+            last = json.loads(self.state("last_ingestion") or "{}")
+            target = last.get("source_id")
+        if len(projects) != 1 or target is None:
+            self.send("Usage : reponds a une confirmation d'ajout avec  /project Nexdoor Talent")
+            return "project_usage"
+        links.record_decision(self.conn, source_id=target, entity_id=projects[0],
+                              decision="approve", level="high", confidence=1.0,
+                              reason="rattachement manuel par Rosy (/project)")
+        self.send(f"💼 Rattache a {_project_name(self.conn, projects[0])}.")
+        return "project_linked"
 
     # -------------------------------------------------------------- questions
     def answer(self, question, *, anchor=None, adjustment=None, base=None, reply_to=None):
@@ -388,11 +545,11 @@ class Gateway:
             result = self._ask(question, llm="off" if agents else "auto")
         lines = [result["answer"]]
         panel = None
+        placeholder = None
         if agents:
-            ready = self.backend is not None and (
-                self.backend.available()
-                or getattr(self.backend, "ensure_ready", lambda **k: False)(
-                    retries=2, delay=2, start=False))
+            # Reponse immediate : l'analyse (LLM) peut prendre quelques dizaines de secondes.
+            placeholder = self.send("🧠 Analyse en cours…", reply_to=reply_to)
+            ready = self.backend is not None and _backend_available(self.backend)
             if ready:
                 panel = council.answer_with_agents(
                     self.conn, self.backend, question, agents, vault_answer=result["answer"],
@@ -402,9 +559,13 @@ class Gateway:
                 )
             lines.append("")
             if panel and panel["opinions"]:
-                lines.append("🤝 Agents consultes (mode " + (mode or "B") + ") :")
+                engine = _engine_label(self.backend)
+                lines.append("🤝 Agents consultes (mode " + (mode or "B") + ")"
+                             + (f" via {engine}" if engine else "") + " :")
             else:
-                why = "Qwen local indisponible" if not ready else "reponse de Qwen inexploitable"
+                why = ("aucun moteur LLM disponible (Qwen local occupe ou injoignable, "
+                       "cloud non configure ou hors budget)") if not ready \
+                    else "reponse du moteur LLM inexploitable"
                 lines.append(f"🤝 Agents selectionnes mais non consultes : {why}.")
             for agent in agents:
                 lines.append(f"• {agent['name']} — {agent['reason']}")
@@ -413,7 +574,14 @@ class Gateway:
                     lines.append(f"\n{opinion['agent']} : {opinion['opinion']}")
                 if panel.get("synthesis"):
                     lines.append(f"\nSynthese (Qwen local, a verifier) : {panel['synthesis']}")
-        message_id = self.send("\n".join(lines), reply_to=reply_to)
+        if placeholder is not None:
+            try:
+                self.client.edit_message(self.chat_id, placeholder, "\n".join(lines))
+                message_id = placeholder
+            except telegram_api.TelegramError:
+                message_id = self.send("\n".join(lines), reply_to=reply_to)
+        else:
+            message_id = self.send("\n".join(lines), reply_to=reply_to)
         source_ids = [s.get("source_id") for s in result["sources"] if s.get("source_id")]
         suggestion_id = grounded.get("suggestion_id") if grounded else None
         self.remember(message_id, "answer", suggestion_id=suggestion_id, question=question,
@@ -751,6 +919,19 @@ class Gateway:
                 pass
 
 
+def _backend_available(backend):
+    try:
+        return backend.available(task="standard")
+    except TypeError:
+        return backend.available()
+
+
+def _engine_label(backend):
+    last = getattr(backend, "last", None) or {}
+    labels = {"local": "Qwen local", "mistral": "Mistral", "anthropic": "Claude"}
+    return labels.get(last.get("provider"), "")
+
+
 def _agent_entry(name, reason):
     import mentor_council as council
 
@@ -817,7 +998,9 @@ HELP_TEXT = (
     "• « Comment exploiter ca pour Nexdoor Talent ? » : je choisis 1 a 3 agents (mode B).\n"
     "• Reponds « ajoute le CFO », « sans le Growth Hacker », « demande plutot au "
     "Recruitment Agent ».\n"
-    "• Envoie un vocal ou un lien (ajoute a l'inbox).\n"
+    "• Envoie un lien, un fichier, une photo ou « garde ca : … » : ajoute au Vault.\n"
+    "• /inbox : derniers ajouts · /save (en reponse) : garder un message · "
+    "/project Nexdoor Talent (en reponse a un ajout) : rattacher.\n"
     "• /mentor ou « qu'est-ce que tu as pour moi ? » : suggestions en attente.\n"
     "• « mets le Mentor en pause jusqu'a lundi », « mode focus », /resume, /status.\n"
     "Aucune action externe sans ton clic."
@@ -846,8 +1029,8 @@ def _single_instance():
 
 def build(db=DEFAULT_DB):
     telegram_api.load_env()
-    # Aucun fallback cloud : la synthese de vault_ask reste locale.
-    os.environ["VAULT_ASK_SYNTHESIZER"] = "local"
+    # La synthese de vault_ask passe par le routeur LLM central (politique .env).
+    os.environ["VAULT_ASK_SYNTHESIZER"] = "router"
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     user = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "")
     chat = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "")
@@ -861,10 +1044,14 @@ def build(db=DEFAULT_DB):
     from vault_db import connect
     from vault_notion_cockpit import NotionCockpitClient
 
+    import llm_router
+
     conn = connect(str(db))
-    backend = mentor_council.OllamaBackend()
+    # Routeur LLM central (Qwen local, Mistral, Claude optionnel), adosse a vault.db.
+    backend = llm_router.bind(conn)
     ready = backend.ensure_ready(retries=10, delay=3, start=True)
-    log.info("Qwen local %s", "pret" if ready else "indisponible (aucun repli cloud)")
+    log.info("moteurs LLM : %s", {k: v["usable"] for k, v in backend.status().items()})
+    log.info("au moins un moteur %s", "pret" if ready else "indisponible pour l'instant")
     return Gateway(conn, telegram_api.TelegramClient(token), allowed_user=user,
                    allowed_chat=chat, backend=backend,
                    notion=NotionCockpitClient(), notion_tasks=mentor_delivery.tasks_client())

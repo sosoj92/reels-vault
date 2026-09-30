@@ -149,7 +149,7 @@ class QwenReadinessTests(GatewayCase):
         self.backend._available = False
         self.gw.handle_update(msg("Demande au CFO ce qu'il pense du sourcing data"))
         text = self.last()["text"]
-        self.assertIn("Agents selectionnes mais non consultes : Qwen local indisponible.", text)
+        self.assertIn("Agents selectionnes mais non consultes : aucun moteur LLM disponible", text)
         self.assertNotIn("Agents consultes", text)
         self.assertIn("Chief Financial Officer", text)
 
@@ -187,8 +187,9 @@ class WordingTests(GatewayCase):
 
     def test_generated_suggestion_is_cleaned(self):
         class Wordy(fx.FakeBackend):
-            def chat_json(self, system, user, schema, *, num_predict=260):
-                result = super().chat_json(system, user, schema, num_predict=num_predict)
+            def chat_json(self, system, user, schema, *, num_predict=260, **routing):
+                result = super().chat_json(system, user, schema, num_predict=num_predict,
+                                           **routing)
                 if schema is council.HYPOTHESIS_SCHEMA:
                     result["summary"] = "Le candidat présente un risque pour le sourcing."
                 return result

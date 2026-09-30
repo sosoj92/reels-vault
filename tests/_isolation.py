@@ -23,6 +23,10 @@ TMP = Path(tempfile.mkdtemp(prefix="reels-vault-test-"))
 os.environ["REELS_VAULT_DB"] = str(TMP / "vault.db")
 os.environ["REELS_VAULT_IMAGES"] = str(TMP / "images")
 os.environ["REELS_VAULT_EXPORTS"] = str(TMP / "exports")
+os.environ["LLM_USAGE_DB"] = str(TMP / "llm_usage.db")
+# Tests hors ligne : aucune cle cloud reelle n'est jamais utilisee.
+for _k in ("MISTRAL_API_KEY", "ANTHROPIC_API_KEY"):
+    os.environ[_k] = ""
 os.environ["TASK_PROVIDER"] = ""  # present mais vide : ignore aussi la variable Windows
 # Variable presente mais vide = service non configure (bloque aussi la lecture des variables Windows).
 for _v in ("CLICKUP_API_TOKEN", "CLICKUP_LIST_ID"):
@@ -35,6 +39,19 @@ def reseau_interdit(*a, **k):
 
 
 urllib.request.urlopen = reseau_interdit
+
+# Aucune connexion reseau reelle (meme via http.client ou un SDK) : echec immediat,
+# jamais d'attente de timeout si Internet est coupe.
+import socket  # noqa: E402
+
+_create_connection = socket.create_connection
+
+
+def _socket_interdit(address, *args, **kwargs):
+    raise OSError(f"connexion reseau interdite pendant les tests : {address[0]}")
+
+
+socket.create_connection = _socket_interdit
 
 
 def verifier():

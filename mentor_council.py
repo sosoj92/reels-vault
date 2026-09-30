@@ -32,8 +32,10 @@ from datetime import datetime, timedelta, timezone
 import mentor_proactive_store as store
 
 MAX_AGENTS = 3
-MODEL = os.environ.get("VAULT_MENTOR_MODEL", "qwen3:1.7b")
-OLLAMA_URL = os.environ.get("VAULT_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+import llm_router  # noqa: E402 - le routeur choisit le moteur ; aucun modele code ici
+
+MODEL = os.environ.get("VAULT_MENTOR_MODEL") or llm_router.cfg("OLLAMA_MODEL")
+OLLAMA_URL = (os.environ.get("VAULT_OLLAMA_URL") or llm_router.cfg("OLLAMA_URL")).rstrip("/")
 
 # Regle initiale de Rosy : au moins un agent >= 4/5 et aucune objection bloquante.
 MIN_BEST_VALUE = 4
@@ -101,6 +103,21 @@ HYPOTHESIS_SCHEMA = {
     "required": ["title", "summary", "hypothesis", "actions"],
 }
 
+VERDICTS_PANEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"agent": {"type": "string"}, **VERDICT_SCHEMA["properties"]},
+                "required": ["agent", *VERDICT_SCHEMA["required"]],
+            },
+        },
+    },
+    "required": ["verdicts"],
+}
+
 PANEL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -133,6 +150,8 @@ class OllamaBackend:
         self.model = model
         self.url = url
         self.timeout = timeout
+        self.keep_alive = f"{int(llm_router.cfg('OLLAMA_IDLE_UNLOAD_MINUTES'))}m"
+        self.last = None
 
     def available(self):
         try:
@@ -164,7 +183,7 @@ class OllamaBackend:
         """Charge le modele en memoire (evite l'attente du premier appel)."""
         request = urllib.request.Request(
             self.url + "/api/generate",
-            data=json.dumps({"model": self.model, "keep_alive": "30m"}).encode("utf-8"),
+            data=json.dumps({"model": self.model, "keep_alive": self.keep_alive}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
         try:
@@ -186,10 +205,10 @@ class OllamaBackend:
                 sleep(delay)
         return False
 
-    def chat_json(self, system, user, schema, *, num_predict=260):
+    def chat_json(self, system, user, schema, *, num_predict=260, **_routing):
         payload = {
             "model": self.model, "stream": False, "think": False, "format": schema,
-            "keep_alive": "30m",
+            "keep_alive": self.keep_alive,
             "options": {"temperature": 0, "num_predict": num_predict, "num_ctx": 4096},
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
@@ -205,6 +224,13 @@ class OllamaBackend:
             return json.loads(raw["message"]["content"])
         except (socket.timeout, TimeoutError, OSError, ValueError, KeyError):
             return None
+
+
+def _model_label(backend):
+    last = getattr(backend, "last", None) or {}
+    if last.get("provider"):
+        return f"{last['provider']}:{last.get('model') or '?'}"
+    return f"{getattr(backend, 'name', 'llm')}:{getattr(backend, 'model', MODEL)}"
 
 
 # ------------------------------------------------------------------ agents
@@ -443,7 +469,8 @@ def build_hypothesis(backend, context):
           "ni « piste » : title (8 mots max), summary (1 a 2 phrases), hypothesis (ce qui "
           "pourrait lui etre utile pour ce projet), actions (1 ou 2 actions concretes et prudentes)."
     )
-    result = backend.chat_json(system, user, HYPOTHESIS_SCHEMA, num_predict=240)
+    result = backend.chat_json(system, user, HYPOTHESIS_SCHEMA, num_predict=240,
+                               task="standard", purpose="mentor_hypothesis")
     if not isinstance(result, dict):
         return None
     actions = [str(a).strip()[:200] for a in result.get("actions") or [] if str(a).strip()][:2]
@@ -512,8 +539,42 @@ def consult_agent(backend, agent, context, hypothesis):
         "sources": context["sources"],
         "references_autorisees": context["allowed_refs"],
     }, ensure_ascii=False)
-    return _validate_verdict(backend.chat_json(system, user, VERDICT_SCHEMA, num_predict=220),
+    return _validate_verdict(backend.chat_json(system, user, VERDICT_SCHEMA, num_predict=220,
+                                               task="standard",
+                                               purpose="agent_independent_review"),
                              context["allowed_refs"])
+
+
+def consult_panel(backend, agents, context, hypothesis):
+    """
+    Mode C courant : UN appel structure produit le verdict de chacun des 1 a 3 agents.
+    (independent_review=True fait des contre-expertises separees.)
+    """
+    briefs = [{"agent": a["name"], "role": a["agent"].description[:300],
+               "playbook": _playbook(a["agent"], max_chars=600)} for a in agents]
+    system = (
+        "Tu fais evaluer une idee pour Rosy par plusieurs specialistes Agency Agents, chacun "
+        "selon son playbook. Rosy dirige ce projet. Reponds en francais, uniquement en JSON : "
+        "un verdict par specialiste (agent = son nom exact) avec verdict (support/neutral/"
+        "oppose), value_score 0 a 5 (4-5 seulement si utile ET actionnable maintenant), "
+        "proposed_action, main_objection, blocking_objection (true UNIQUEMENT si l'idee est "
+        "fausse, risquee, hors sujet ou deja connue), confidence 0 a 1, evidence_refs "
+        "(uniquement parmi les references fournies). Chaque specialiste garde son angle.")
+    user = json.dumps({
+        "specialistes": briefs,
+        "projet": context["project"],
+        "idee": {k: context[k] for k in ("type", "title", "score")},
+        "hypothese": hypothesis,
+        "sources": context["sources"],
+        "references_autorisees": context["allowed_refs"],
+    }, ensure_ascii=False)
+    raw = backend.chat_json(system, user, VERDICTS_PANEL_SCHEMA, num_predict=520,
+                            task="standard", purpose="agent_panel_mode_c")
+    verdicts = {}
+    for item in (raw or {}).get("verdicts") or []:
+        if isinstance(item, dict) and item.get("agent"):
+            verdicts[item["agent"]] = _validate_verdict(item, context["allowed_refs"])
+    return {a["name"]: verdicts.get(a["name"]) for a in agents}
 
 
 # ------------------------------------------------------------------ filtre final
@@ -571,7 +632,7 @@ def disagreement(verdicts):
     return None
 
 
-def review_candidate(conn, candidate, backend, *, now=None):
+def review_candidate(conn, candidate, backend, *, now=None, independent_review=False):
     """
     shortlist -> Qwen -> agents C -> filtre -> suggestion. Retourne un resume.
     LLM indisponible : le candidat reste shortlist (nouvel essai plus tard).
@@ -604,8 +665,11 @@ def review_candidate(conn, candidate, backend, *, now=None):
     session_id = f"C:{cid}:{at}"
     verdicts = []
     if hypothesis is not None:
+        panel = None if independent_review else consult_panel(backend, agents, context,
+                                                               hypothesis)
         for item in agents:
-            data = consult_agent(backend, item["agent"], context, hypothesis)
+            data = consult_agent(backend, item["agent"], context, hypothesis) \
+                if independent_review else panel.get(item["name"])
             verdicts.append({"name": item["name"], "reason": item["reason"], "verdict_data": data})
             if data:
                 store.record_consultation(
@@ -616,7 +680,7 @@ def review_candidate(conn, candidate, backend, *, now=None):
                     verdict=data["verdict"], value_score=data["value_score"],
                     proposed_action=data["proposed_action"],
                     main_objection=data["main_objection"], confidence=data["confidence"],
-                    evidence_refs=data["evidence_refs"], model=f"{backend.name}:{MODEL}",
+                    evidence_refs=data["evidence_refs"], model=_model_label(backend),
                     at=at, commit=False,
                 )
         conn.commit()
@@ -658,7 +722,8 @@ def review_candidate(conn, candidate, backend, *, now=None):
         "disagreement": conflict,
         "confidence": round(max(v["verdict_data"]["confidence"] for v in verdicts
                                 if v["verdict_data"]), 2),
-        "llm": f"{backend.name}:{MODEL}",
+        "llm": _model_label(backend),
+        "review": "independent" if independent_review else "panel",
         "session_id": session_id,
     }
     explanation = "Hypothese (synthese locale Qwen, a verifier) : " + hypothesis["hypothesis"]
@@ -675,11 +740,12 @@ def review_candidate(conn, candidate, backend, *, now=None):
             "agents": panel, "disagreement": conflict}
 
 
-def review_shortlist(conn, backend, *, now=None, limit=2):
+def review_shortlist(conn, backend, *, now=None, limit=2, independent_review=False):
     """Revue des meilleurs candidats shortlist (operation lourde : PC au repos)."""
     results = []
     for candidate in store.list_candidates(conn, "shortlisted")[:max(0, int(limit))]:
-        results.append(review_candidate(conn, candidate, backend, now=now))
+        results.append(review_candidate(conn, candidate, backend, now=now,
+                                        independent_review=independent_review))
     return results
 
 
@@ -712,7 +778,8 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
         system += (" Un CONTEXTE ACTIF est fourni : la question porte sur lui ; "
                    "ne parle pas d'autres sujets.")
     user = json.dumps(payload, ensure_ascii=False)
-    result = backend.chat_json(system, user, PANEL_SCHEMA, num_predict=380)
+    result = backend.chat_json(system, user, PANEL_SCHEMA, num_predict=380,
+                               task="standard", purpose=f"agents_mode_{mode}")
     if not isinstance(result, dict):
         return None
     opinions = []
@@ -728,7 +795,7 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
                 agent_name=item["agent"], mode=mode, session_id=session_id,
                 inputs={"question": question[:500]}, verdict="opinion",
                 evidence_refs=[f"source:{s.get('source_id')}" for s in sources[:4]],
-                model=f"{backend.name}:{MODEL}", commit=False,
+                model=_model_label(backend), commit=False,
             )
         conn.commit()
     return {"opinions": opinions,
