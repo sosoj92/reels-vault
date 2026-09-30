@@ -55,7 +55,8 @@ ANAPHORA_RE = re.compile(
 ACTIVE_CONTEXT_MINUTES = 60
 ADVICE_MARKERS = ("comment exploiter", "qu'en pense", "que pense", "ton avis", "conseil",
                   "strategie", "idee pour", "comment utiliser", "demande a", "demande au",
-                  "demande aux", "que ferait")
+                  "demande aux", "que ferait", "analyse", "compare", "propose", "recommande",
+                  "optimise", "optimiser")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS telegram_state (
@@ -565,6 +566,48 @@ class Gateway:
             })
         return {"projets": projects} if projects else None
 
+    def lis_runtime_context(self):
+        """Configuration LIS courante, sans secret, pour les questions sur le systeme lui-meme."""
+        if self.backend is None:
+            status = {}
+        else:
+            try:
+                status = self.backend.status()
+            except Exception:  # noqa: BLE001 - contexte d'appoint uniquement
+                status = {}
+        try:
+            import llm_router
+
+            policy = {
+                "light_chain": llm_router.cfg("LLM_CHAIN_LIGHT"),
+                "standard_chain": llm_router.cfg("LLM_CHAIN_STANDARD"),
+                "complex_chain": llm_router.cfg("LLM_CHAIN_COMPLEX"),
+                "local_model": llm_router.cfg("OLLAMA_MODEL"),
+                "openrouter_standard_model": llm_router.cfg("OPENROUTER_STANDARD_MODEL"),
+                "openrouter_complex_model": llm_router.cfg("OPENROUTER_COMPLEX_MODEL"),
+                "openrouter_daily_budget_usd": llm_router.cfg("OPENROUTER_DAILY_BUDGET_USD"),
+            }
+        except Exception:  # noqa: BLE001
+            policy = {}
+        return {
+            "system": "Life Intelligence System",
+            "data_flow": [
+                "Telegram -> retrieval Vault (vault_ask)",
+                "consultation -> Agency Agents (mentor_council)",
+                "LLM -> routeur central (llm_router)",
+                "source de verite -> vault.db",
+                "cockpit humain -> Notion",
+            ],
+            "retrieval": "source-first, contexte borne, synthese LLM optionnelle",
+            "telegram": {
+                "polling": True,
+                "mentor_tick_seconds": TICK_SECONDS,
+                "notion_sync_seconds": NOTION_SYNC_SECONDS,
+            },
+            "llm_policy": policy,
+            "llm_status": status,
+        }
+
     @staticmethod
     def answer_chunks(text, limit=3800):
         """Decoupe sans perte les longues reponses avant la limite Telegram."""
@@ -661,6 +704,14 @@ class Gateway:
         placeholder = None
         consultation_context = grounded["agent_context"] if grounded \
             else self.project_consult_context(project_ids)
+        folded_question = fold(question)
+        if "life intelligence" in folded_question or re.search(r"(?<![a-z0-9])lis(?![a-z0-9])",
+                                                                folded_question):
+            lis_context = self.lis_runtime_context()
+            if consultation_context:
+                consultation_context = {**consultation_context, "lis_runtime": lis_context}
+            else:
+                consultation_context = {"lis_runtime": lis_context}
         if agents:
             placeholder = self.send("🧠 Analyse en cours…", reply_to=reply_to)
             # Les longues demandes structurees meritent le chemin complexe : Gemini si configure,
