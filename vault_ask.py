@@ -545,9 +545,8 @@ def synthesize_router(question, sources, agents, timeout):
     info = {"status": "ok" if text else "unavailable", "provider": last.get("provider"),
             "model": last.get("model"), "elapsed_s": round(time.perf_counter() - started, 1)}
     if text:
-        labels = {"local": "locale (Qwen)", "gemini": "Gemini", "openrouter": "OpenRouter",
-                  "mistral": "Mistral", "anthropic": "Claude"}
-        info["label"] = labels.get(last.get("provider"), last.get("provider") or "LLM")
+        # Le moteur reel reste dans le journal technique (llm_usage.db), pas dans la reponse.
+        info["plain"] = True
         return _cut(_complete_sentences(" ".join(text.split())), 700), info
     info["reason"] = last.get("reason")
     return None, info
@@ -862,7 +861,9 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
             if synthesis:
                 break
         llm_info = {**llm_info, "attempts": attempts}
-        if synthesis:
+        if synthesis and llm_info.get("plain"):
+            answer += f"\n\nSynthèse : {synthesis}"
+        elif synthesis:
             label = llm_info.get("label") or f"locale ({LOCAL_MODEL})"
             answer += f"\n\nSynthèse {label}, à vérifier : {synthesis}"
 

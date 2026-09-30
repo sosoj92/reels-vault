@@ -144,6 +144,166 @@ class ActiveContextTests(GatewayCase):
         self.assertNotIn(f"source:{self.github}", refs)
 
 
+class ClosureV3ContextTests(ActiveContextTests):
+    """Cloture V3 : projet -> suggestion -> agent -> « cette opportunite »."""
+
+    # Les tests herites sont deja executes par ActiveContextTests.
+    test_b_growth_hacker_gets_the_open_suggestion = None
+    test_c_mode_b_stays_anchored_on_the_active_suggestion = None
+    test_e_no_unrelated_source_reaches_an_agent = None
+    test_without_reference_to_context_classic_retrieval_is_used = None
+    test_reply_to_an_answer_anchors_on_its_sources = None
+
+    ANALYSE = ("Analyse cette opportunité pour Nexdoor Talent et donne-moi les 3 risques "
+               "principaux et les 3 actions les plus utiles.")
+
+    def test_open_suggestion_then_this_opportunity_keeps_same_suggestion(self):
+        self.gw.handle_update(msg("Que sais-tu de Nexdoor Talent ?", message_id=40))
+        self.assertIn("📁 Nexdoor Talent", self.last()["text"])
+        self.open_suggestion()
+        self.gw.handle_update(msg("Growth Hacker, qu'en penses-tu ?", message_id=41))
+        asked = len(self.asked)
+        self.backend.prompts.clear()
+        self.assertEqual(self.gw.handle_update(msg(self.ANALYSE, message_id=42)),
+                         "answer:B:anchored")
+        self.assertEqual(len(self.asked), asked)  # aucune recherche parasite
+        context = _panel_payloads(self.backend)[-1]["contexte_actif"]
+        self.assertEqual(context["suggestion"], self.sug["suggestion_id"])
+        self.assertEqual(context["projet"], "Nexdoor Talent")
+        self.assertEqual(context["preuves"]["source_ids"],
+                         self.sug["evidence"]["candidate"]["source_ids"])
+        self.assertIn(f"📌 Contexte : {self.sug['suggestion_id']}", self.last()["text"])
+
+    def test_project_view_then_this_opportunity_uses_the_project_suggestion(self):
+        # Sans ouvrir la suggestion : la vue projet ancre le contexte sur sa suggestion ouverte.
+        self.gw.handle_update(msg("Que sais-tu de Nexdoor Talent ?", message_id=40))
+        self.backend.prompts.clear()
+        self.gw.handle_update(msg(self.ANALYSE, message_id=41))
+        context = _panel_payloads(self.backend)[-1]["contexte_actif"]
+        self.assertEqual(context["suggestion"], self.sug["suggestion_id"])
+
+    def test_project_mention_enriches_but_does_not_replace_active_context(self):
+        self.open_suggestion()
+        self.backend.prompts.clear()
+        self.gw.handle_update(msg("Comment exploiter cette idée pour Nexdoor Talent ?",
+                                  message_id=43))
+        context = _panel_payloads(self.backend)[-1]["contexte_actif"]
+        self.assertEqual(context["suggestion"], self.sug["suggestion_id"])
+        self.assertIn("Nexdoor Talent", context["projets_mentionnes"])
+
+    def test_active_context_is_per_conversation(self):
+        self.open_suggestion()
+        self.assertIsNotNone(self.gw.active())
+        other = self.make_gateway()
+        other.chat_id = "autre-conversation"
+        self.assertIsNone(other.active())
+        self.assertIsNone(other.open_suggestion())
+
+    def test_decision_closes_the_open_suggestion(self):
+        self.open_suggestion()
+        self.assertEqual(self.gw.open_suggestion(), self.sug["suggestion_id"])
+        self.gw.handle_update(click(f"s:{self.sug['suggestion_id']}:insight",
+                                    self.last()["message_id"]))
+        self.assertIsNone(self.gw.open_suggestion())
+
+    def test_agent_prompt_contains_active_evidence(self):
+        systems = []
+        original = self.backend.chat_json
+
+        def spy(system, user, schema, **kwargs):
+            if schema is council.PANEL_SCHEMA:
+                systems.append(system)
+            return original(system, user, schema, **kwargs)
+
+        self.backend.chat_json = spy
+        self.open_suggestion()
+        self.backend.prompts.clear()
+        self.gw.handle_update(msg("Growth Hacker, qu'en penses-tu ?", message_id=44))
+        payload = _panel_payloads(self.backend)[-1]
+        self.assertEqual(payload["question"], "Growth Hacker, qu'en penses-tu ?")
+        context = payload["contexte_actif"]
+        for key in ("suggestion", "projet", "hypothese", "preuves", "sources",
+                    "verdicts_existants"):
+            self.assertTrue(context.get(key), key)
+        self.assertTrue(payload["sources"])
+        for rule in ("Reponds directement au probleme fourni",
+                     "N'explique pas ton role generique",
+                     "N'introduis pas d'entreprise, marche, outil, loi ou fait specifique "
+                     "absent des preuves fournies",
+                     "Si une information n'est pas supportee, ne l'invente pas"):
+            self.assertIn(rule, systems[-1])
+        text = self.last()["text"]
+        self.assertNotIn("Qwen", text)
+        self.assertNotIn(" via ", text)
+
+    def test_unsupported_claims_are_removed_from_agent_answers(self):
+        original = self.backend.chat_json
+
+        def hallucinating(system, user, schema, **kwargs):
+            if schema is council.PANEL_SCHEMA:
+                return {"opinions": [{"agent": "Growth Hacker", "opinion":
+                                      "En tant que Growth Hacker, j'aime les boucles virales. "
+                                      "Le sourcing data de Nexdoor Talent merite une grille. "
+                                      "Sur Boss Zhipin et Lagou, le droit du travail chinois "
+                                      "impose des controles."}],
+                        "synthesis": "Formaliser la grille. Viser la Chine via Lagou."}
+            return original(system, user, schema, **kwargs)
+
+        self.backend.chat_json = hallucinating
+        self.open_suggestion()
+        self.gw.handle_update(msg("Growth Hacker, qu'en penses-tu ?", message_id=45))
+        text = self.last()["text"]
+        for banned in ("Boss Zhipin", "Lagou", "chinois", "Chine", "En tant que"):
+            self.assertNotIn(banned, text)
+        self.assertIn("Le sourcing data de Nexdoor Talent merite une grille.", text)
+        self.assertIn("Synthèse : Formaliser la grille.", text)
+
+
+class SensitiveRoutingTests(GatewayCase):
+    TEXT = ("Information sensible TEST : mon dossier médical fictif contient diagnostic XYZ. "
+            "Résume cette information.")
+
+    def _router(self, *, local_up):
+        from test_llm_router import FakeProvider, router
+
+        return router(local=FakeProvider("local", False, reachable=local_up,
+                                         replies=[]))
+
+    def _run(self, r):
+        import llm_router
+
+        self.gw.backend = r
+        with mock.patch.object(llm_router, "shared", return_value=r):
+            self.gw.ask_fn = lambda conn, question, llm="auto": vault_ask.ask(
+                conn, question, mode="consult", llm="auto", semantic="off")
+            self.gw.handle_update(msg(self.TEXT, message_id=90))
+        return r
+
+    def test_sensitive_text_never_calls_openrouter(self):
+        import llm_router
+
+        self.assertEqual(llm_router.classify(self.TEXT), "sensitive")
+        for local_up in (True, False):
+            r = self._run(self._router(local_up=local_up))
+            self.addCleanup(lambda r=r: r.conn and r.conn.close())
+            self.assertEqual(r.providers["openrouter"].calls, 0)
+            self.assertEqual(r.providers["gemini"].calls, 0)
+            self.assertTrue(self.telegram.sent)  # une reponse est toujours donnee
+            # Synthese forcee sur des sources du Vault : le routeur decide seul.
+            sources = vault_ask.ask(self.conn, "sourcing de profils data", mode="consult",
+                                    llm="off", semantic="off")["sources"]
+            with mock.patch.object(llm_router, "shared", return_value=r):
+                text, info = vault_ask.synthesize_router(self.TEXT, sources, [], 5)
+            self.assertEqual(r.providers["openrouter"].calls, 0)
+            self.assertEqual(r.providers["gemini"].calls, 0)
+            if local_up:
+                self.assertEqual(info["provider"], "local")  # Qwen local uniquement
+            else:
+                self.assertIsNone(text)
+                self.assertEqual(r.providers["local"].calls, 0)
+                self.assertTrue(r.last["queued"])  # en attente, jamais le cloud
+
+
 class QwenReadinessTests(GatewayCase):
     def test_d_selected_but_not_consulted_when_qwen_is_down(self):
         self.backend._available = False

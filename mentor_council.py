@@ -762,9 +762,11 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
     briefs = [{"agent": a["name"], "role": a["agent"].description[:300],
                "playbook": _playbook(a["agent"], max_chars=700)} for a in agents]
     system = ("Tu fais parler des specialistes Agency Agents pour Rosy. Francais, JSON "
-              "uniquement. Chaque avis : 2 a 3 phrases, concret, fonde uniquement sur les "
-              "sources du Vault fournies ; si elles ne suffisent pas, dis-le. Aucune action "
-              "externe : proposer, jamais executer.")
+              "uniquement. Chaque avis : 2 a 4 phrases. Reponds directement au probleme "
+              "fourni. N'explique pas ton role generique. N'introduis pas d'entreprise, "
+              "marche, outil, loi ou fait specifique absent des preuves fournies. Si une "
+              "information n'est pas supportee, ne l'invente pas. Aucune action externe : "
+              "proposer, jamais executer.")
     payload = {
         "question": question,
         "specialistes": briefs,
@@ -780,14 +782,21 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
     user = json.dumps(payload, ensure_ascii=False)
     result = backend.chat_json(system, user, PANEL_SCHEMA, num_predict=380,
                                task="standard", purpose=f"agents_mode_{mode}")
+    # Preuves admises : tout le payload sauf les playbooks generiques des agents.
+    allowed = allowed_text(conn, json.dumps(
+        {**payload, "specialistes": [a["name"] for a in agents]}, ensure_ascii=False))
     if not isinstance(result, dict):
         return None
     opinions = []
     known = {a["name"] for a in agents}
+    removed = []
     for item in result.get("opinions") or []:
         if isinstance(item, dict) and item.get("agent") in known and item.get("opinion"):
-            opinions.append({"agent": item["agent"],
-                             "opinion": " ".join(str(item["opinion"]).split())[:600]})
+            text, dropped = filter_unsupported(" ".join(str(item["opinion"]).split())[:900],
+                                               allowed)
+            removed += dropped
+            opinions.append({"agent": item["agent"], "opinion": text[:700] or
+                             "(avis ecarte : affirmations non etayees par les preuves du Vault)"})
     if store.writes_allowed(conn) and store.schema_present(conn):
         for item in opinions:
             store.record_consultation(
@@ -798,5 +807,72 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
                 model=_model_label(backend), commit=False,
             )
         conn.commit()
-    return {"opinions": opinions,
-            "synthesis": " ".join(str(result.get("synthesis") or "").split())[:600]}
+    synthesis, dropped = filter_unsupported(
+        " ".join(str(result.get("synthesis") or "").split())[:900], allowed)
+    return {"opinions": opinions, "synthesis": synthesis[:700],
+            "removed_claims": removed + dropped}
+
+
+# ------------------------------------------------------------------ affirmations non etayees
+
+_ROLE_TALK = re.compile(r"^(en tant que|as an? |je suis (un|une|le|la) |mon role|mon rôle|"
+                        r"en ma qualite|en ma qualité|dans mon role|dans mon rôle)", re.I)
+_SPECIFIC = re.compile(r"(chine|chinois|chinoise|china|chinese|droit du travail|code du travail|"
+                       r"\brgpd\b|\bgdpr\b|\bloi\b|reglementation|réglementation|"
+                       r"etats-unis|états-unis|\busa\b)", re.I)
+_PROPER = re.compile(r"(?<![\w'’-])([A-Z][a-zA-Z0-9À-ÿ'’&.-]+(?:\s+[A-Z][a-zA-Z0-9À-ÿ'’&.-]+)*)")
+_FIGURE = re.compile(r"\d[\d\s.,]*\s?(%|€|\$|k€|m€|euros?|dollars?)", re.I)
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
+
+def allowed_text(conn, payload_json):
+    """Tout ce que le Vault a fourni (question, preuves, contexte, profils de projet)."""
+    parts = [payload_json]
+    try:
+        import mentor_project_profiles as profiles
+
+        for profile in profiles.list_profiles(conn):
+            if _fold(profile["project_name"]) in _fold(payload_json):
+                parts.append(json.dumps(profile, ensure_ascii=False, default=str))
+    except Exception:  # noqa: BLE001 - profils absents : preuves seules
+        pass
+    return _fold(" ".join(parts))
+
+
+# Sigles et termes generiques qui ne constituent pas un fait specifique.
+_GENERIC = {"ia", "ai", "cv", "ats", "rh", "hr", "llm", "llms", "pdf", "saas", "b2b", "b2c", "kpi",
+            "roi", "mvp", "api", "crm", "seo", "faq", "poc", "vault", "rosy", "ok"}
+
+
+def filter_unsupported(text, allowed):
+    """
+    Retire les phrases qui introduisent un nom propre, un pays, une loi ou un chiffre
+    absents des preuves fournies, et le discours de role generique. Retourne
+    (texte filtre, phrases retirees).
+    """
+    kept, removed = [], []
+    for sentence in _SENTENCE.split(str(text or "").strip()):
+        if not sentence:
+            continue
+        reason = None
+        if _ROLE_TALK.search(sentence.strip()):
+            reason = "role generique"
+        for match in _SPECIFIC.finditer(sentence):
+            if _fold(match.group(0)) not in allowed:
+                reason = f"non etaye : {match.group(0)}"
+        for index, match in enumerate(_PROPER.finditer(sentence)):
+            phrase = match.group(1).strip(".-")
+            words = phrase.split()
+            if match.start() == 0 and len(words) == 1:
+                continue  # majuscule de debut de phrase
+            if len(phrase) > 1 and _fold(phrase) not in allowed and not all(
+                    _fold(w) in allowed or _fold(w) in _GENERIC for w in words):
+                reason = f"non etaye : {phrase}"
+        for match in _FIGURE.finditer(sentence):
+            if _fold(match.group(0).strip()) not in allowed:
+                reason = f"chiffre non etaye : {match.group(0).strip()}"
+        if reason:
+            removed.append({"sentence": sentence[:200], "reason": reason})
+        else:
+            kept.append(sentence)
+    return " ".join(kept).strip(), removed

@@ -48,6 +48,7 @@ MENTOR_PHRASES = ("qu'est-ce que tu as pour moi", "qu est ce que tu as pour moi"
 # Expressions qui renvoient au contexte actif (« ca », « qu'en penses-tu »...).
 ANAPHORA_RE = re.compile(
     r"(?<![a-z])(ca|ceci|cela|ce contenu|cette idee|cette suggestion|cette source|cette piste|"
+    r"cette opportunite|cette analyse|analyse cette|ce point|ce risque|ces risques|"
     r"ce sujet|la dessus|la-dessus|qu'en penses|qu en penses|qu'en pense|qu en pense|"
     r"ce qu'il en pense|ce qu'elle en pense|ce qu'il pense|ce qu'elle pense|ton avis|"
     r"son avis|comment exploiter|comment l'exploiter|developpe|detaille)(?![a-z])")
@@ -189,11 +190,11 @@ class Gateway:
     def set_active(self, kind, **data):
         import mentor_proactive_store as store
 
-        self.set_state("active_context", json.dumps(
+        self.set_state(f"active_context:{self.chat_id}", json.dumps(
             {"kind": kind, "at": store.now_iso(), **data}, ensure_ascii=False))
 
-    def active(self):
-        raw = self.state("active_context")
+    def _fresh(self, key):
+        raw = self.state(f"{key}:{self.chat_id}")
         if not raw:
             return None
         item = json.loads(raw)
@@ -201,6 +202,28 @@ class Gateway:
         if now_utc() - at > timedelta(minutes=ACTIVE_CONTEXT_MINUTES):
             return None
         return item
+
+    def active(self):
+        return self._fresh("active_context")
+
+    def open_suggestion(self, suggestion_id=None, *, close=False):
+        """Suggestion ouverte dans cette conversation (prioritaire sur le reste du contexte)."""
+        import mentor_proactive_store as store
+
+        if close:
+            self.set_state(f"open_suggestion:{self.chat_id}", None)
+            return None
+        if suggestion_id:
+            self.set_state(f"open_suggestion:{self.chat_id}", json.dumps(
+                {"suggestion_id": suggestion_id, "at": store.now_iso()}))
+            return suggestion_id
+        item = self._fresh("open_suggestion")
+        if not item:
+            return None
+        suggestion = store.get_suggestion(self.conn, item["suggestion_id"])
+        if suggestion is None or suggestion["status"] in ("dismissed", "expired"):
+            return None
+        return item["suggestion_id"]
 
     def resolve_context(self, text, reply_context):
         """
@@ -218,6 +241,10 @@ class Gateway:
                         "question": reply_context.get("question"), "why": "message repondu"}
         if not refers_to_context(text):
             return None
+        # 2. suggestion ouverte, 3. contexte actif du dernier echange, 4. dernier contenu.
+        opened = self.open_suggestion()
+        if opened:
+            return {"kind": "suggestion", "suggestion_id": opened, "why": "suggestion ouverte"}
         active = self.active()
         if not active:
             return None
@@ -460,7 +487,7 @@ class Gateway:
             "item_id": result.get("item_id"), "source_id": result.get("source_id")})
         if result.get("source_id"):
             self.set_active("sources", source_ids=[result["source_id"]], question=None)
-            self.set_state("last_ingestion", json.dumps({"source_id": result["source_id"],
+            self.set_state(f"last_ingestion:{self.chat_id}", json.dumps({"source_id": result["source_id"],
                                                          "item_id": result.get("item_id")}))
         return message_id
 
@@ -492,7 +519,7 @@ class Gateway:
         if context and context.get("kind") == "ingestion":
             target = context["payload"].get("source_id")
         if target is None:
-            last = json.loads(self.state("last_ingestion") or "{}")
+            last = json.loads(self.state(f"last_ingestion:{self.chat_id}") or "{}")
             target = last.get("source_id")
         if len(projects) != 1 or target is None:
             self.send("Usage : reponds a une confirmation d'ajout avec  /project Nexdoor Talent")
@@ -515,6 +542,12 @@ class Gateway:
             anchor = base.get("payload", {}).get("anchor")
         grounded = self.grounding(anchor) if anchor else None
         project_ids = [grounded["project_id"]] if grounded and grounded.get("project_id") else []
+        if grounded:
+            for pid in council.projects_in_text(self.conn, question):
+                if pid not in project_ids:
+                    project_ids.append(pid)  # enrichit, sans remplacer la source active
+            grounded["agent_context"]["projets_mentionnes"] = [
+                _project_name(self.conn, pid) for pid in project_ids]
 
         if adjustment:
             prior = base.get("agents") or []
@@ -548,6 +581,8 @@ class Gateway:
             if result.get("route") == "project_view" and mode != "A":
                 # Question factuelle sur un projet : la vue du Vault suffit, pas d'agents.
                 mode, agents = None, []
+            if result.get("route") == "project_view":
+                self._anchor_project(result["project_id"])
         lines = [result["answer"]]
         panel = None
         placeholder = None
@@ -564,9 +599,8 @@ class Gateway:
                 )
             lines.append("")
             if panel and panel["opinions"]:
-                engine = _engine_label(self.backend)
-                lines.append("🤝 Agents consultes (mode " + (mode or "B") + ")"
-                             + (f" via {engine}" if engine else "") + " :")
+                # Le moteur reel reste dans les journaux techniques, pas dans la reponse.
+                lines.append("🤝 Agents consultes (mode " + (mode or "B") + ") :")
             else:
                 why = ("aucun moteur LLM disponible (Qwen local occupe ou injoignable, "
                        "cloud non configure ou hors budget)") if not ready \
@@ -578,7 +612,7 @@ class Gateway:
                 for opinion in panel["opinions"]:
                     lines.append(f"\n{opinion['agent']} : {opinion['opinion']}")
                 if panel.get("synthesis"):
-                    lines.append(f"\nSynthese (Qwen local, a verifier) : {panel['synthesis']}")
+                    lines.append(f"\nSynthèse : {panel['synthesis']}")
         if placeholder is not None:
             try:
                 self.client.edit_message(self.chat_id, placeholder, "\n".join(lines))
@@ -593,12 +627,28 @@ class Gateway:
                       agents=[a["name"] for a in agents], mode=mode,
                       payload={"sources": source_ids, "anchor": anchor})
         if suggestion_id:
-            self.set_active("suggestion", suggestion_id=suggestion_id)
-        elif source_ids:
+            self.set_active("suggestion", suggestion_id=suggestion_id,
+                            project_id=grounded.get("project_id"))
+        elif source_ids and result.get("route") != "project_view":
             self.set_active("sources", source_ids=source_ids, question=question)
         if not grounded:
             self._publish_question(question, result["sources"])
         return f"answer:{mode or 'ask'}" + (":anchored" if grounded else "")
+
+    def _anchor_project(self, project_id):
+        """Vue projet : le contexte devient la suggestion ouverte du projet, sinon le projet."""
+        row = self.conn.execute(
+            "SELECT suggestion_id FROM mentor_suggestions WHERE project_id = ? AND status IN "
+            "('ready', 'sent', 'opened', 'snoozed') ORDER BY updated_at DESC LIMIT 1",
+            (project_id,)).fetchone() if self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'mentor_suggestions'").fetchone() else None
+        opened = self.open_suggestion()
+        if opened and row is None:
+            self.open_suggestion(close=True)
+        if row:
+            self.set_active("suggestion", suggestion_id=row[0], project_id=project_id)
+        else:
+            self.set_active("project", project_id=project_id)
 
     def grounding(self, anchor):
         """Contexte explicite -> texte, sources et contexte complet transmis aux agents."""
@@ -637,6 +687,21 @@ class Gateway:
                     "actions_proposees": evidence.get("actions"),
                 },
             }
+        if anchor.get("kind") == "project":
+            import vault_ask
+
+            view = vault_ask.project_view(self.conn, anchor["project_id"])
+            if view is None:
+                return None
+            profile = view.get("profile") or {}
+            sources = [{"source_id": s["source_id"], "title": s["title"],
+                        "snippet": (s.get("snippet") or "")[:300], "url": s.get("url")}
+                       for s in view["sources"]]
+            return {"project_id": anchor["project_id"], "sources": sources,
+                    "text": f"📌 Contexte : {view['entity']['name']}",
+                    "agent_context": {"projet": view["entity"]["name"],
+                                      "description": profile.get("description"),
+                                      "sources": sources}}
         if anchor.get("kind") == "sources":
             briefs = [b for b in (council._source_brief(self.conn, sid)
                                   for sid in anchor.get("source_ids") or []) if b]
@@ -807,7 +872,9 @@ class Gateway:
                                           suggestion_ids=[sid], chat_id=self.chat_id,
                                           message_id=detail_id)
                 self.remember(detail_id, "detail", suggestion_id=sid)
-                self.set_active("suggestion", suggestion_id=sid)
+                self.set_active("suggestion", suggestion_id=sid,
+                                project_id=suggestion.get("project_id"))
+                self.open_suggestion(sid)
             elif action == "later" and not arg:
                 self.client.edit_message(self.chat_id, message_id, message.get("text", ""),
                                          buttons=[[{"text": label, "callback_data":
@@ -850,6 +917,8 @@ class Gateway:
             self.client.answer_callback(callback["id"], str(exc)[:150])
             return "refused"
         self.client.answer_callback(callback["id"])
+        if action in ("task", "insight", "no") or (action in ("nope", "later") and arg):
+            self.open_suggestion(close=True)
         self._sync_notion_row()
         return f"callback:{result}"
 
@@ -929,13 +998,6 @@ def _backend_available(backend):
         return backend.available(task="standard")
     except TypeError:
         return backend.available()
-
-
-def _engine_label(backend):
-    last = getattr(backend, "last", None) or {}
-    labels = {"local": "Qwen local", "gemini": "Gemini", "openrouter": "OpenRouter",
-              "mistral": "Mistral", "anthropic": "Claude"}
-    return labels.get(last.get("provider"), "")
 
 
 def _agent_entry(name, reason):
