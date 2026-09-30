@@ -22,6 +22,13 @@ if errorlevel 1 goto :fin
 "%PY%" "%ROOT%\vault_refresh.py" --vault "%ROOT%" --db "%ROOT%\vault.db"
 if errorlevel 1 goto :fin
 
+rem Ingestion Gateway : inbox locale (inbox\files, inbox\sensitive) et videos envoyees
+rem par Telegram rapprochees de leur contenu. Non bloquant.
+"%PY%" "%ROOT%\vault_ingestion.py" --db "%ROOT%\vault.db" --local-inbox --reconcile
+
+rem Vault Library (Notion) : projection incrementale des sources, sans LLM. Non bloquant.
+"%PY%" "%ROOT%\vault_notion_library.py" --db "%ROOT%\vault.db" --confirm --sources-only
+
 "%PY%" "%ROOT%\mentor_worker.py" --limit 20 --confirm
 if errorlevel 1 goto :fin
 

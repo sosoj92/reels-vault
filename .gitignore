@@ -41,3 +41,9 @@ models/
 
 # Verrou V2 : present uniquement apres validation finale de l utilisateur
 life_intelligence_v2.enabled
+
+# Verrou du Mentor proactif V3 : present uniquement apres validation
+mentor_proactive.enabled
+
+# Inbox locale (fichiers personnels a ingerer) et fichiers recus par Telegram
+inbox/

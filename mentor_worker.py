@@ -36,20 +36,21 @@ OPPORTUNITY_WORDS = {
 }
 
 
-QWEN_MODEL = "qwen3:1.7b"
-OLLAMA_BASE = os.environ.get("VAULT_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+import llm_router  # noqa: E402 - moteur choisi par le routeur central
+
+QWEN_MODEL = llm_router.cfg("OLLAMA_MODEL")
+OLLAMA_BASE = (os.environ.get("VAULT_OLLAMA_URL") or llm_router.cfg("OLLAMA_URL")).rstrip("/")
 QWEN_URL = f"{OLLAMA_BASE}/api/chat"
 
 
 def ollama_available(timeout=3):
-    """Ollama repond et le modele local est installe."""
-    try:
-        with urllib.request.urlopen(f"{OLLAMA_BASE}/api/tags", timeout=timeout) as resp:
-            models = json.load(resp).get("models", [])
-    except Exception:
-        return False
-    names = {m.get("name") for m in models} | {m.get("model") for m in models}
-    return QWEN_MODEL in names
+    """Un moteur LLM est utilisable selon le routeur (Qwen local ou cloud autorise)."""
+    return llm_router.shared().available(task="light")
+
+
+def _router_label():
+    last = llm_router.shared().last or {}
+    return f"{last['provider']}:{last.get('model')}" if last.get("provider") else None
 
 QWEN_SCHEMA = {
     "type": "object",
@@ -137,29 +138,18 @@ SOURCE :
     }
 
     try:
-        req = urllib.request.Request(
-            QWEN_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json"
-            },
-        )
-
-        with urllib.request.urlopen(
-            req,
-            timeout=60
-        ) as response:
-            raw = json.load(response)
-
-        result = json.loads(
-            raw["message"]["content"]
-        )
+        result = llm_router.shared().chat_json(
+            payload["messages"][0]["content"], payload["messages"][1]["content"],
+            QWEN_SCHEMA, num_predict=120, task="light", purpose="mentor_worker_fast")
+        if not isinstance(result, dict):
+            return None
 
         return {
             "classification": result["classification"],
             "relevance": float(result["relevance"]),
             "confidence": float(result["confidence"]),
             "needs_agency": bool(result["needs_agency"]),
+            "model": _router_label(),
         }
 
     except Exception:
@@ -447,7 +437,7 @@ def classify(conn, row, v2=True):
         qrel = qwen["relevance"]
         qconf = qwen["confidence"]
 
-        analysis_model = QWEN_MODEL
+        analysis_model = qwen.get("model") or QWEN_MODEL
 
         if qconf >= 0.55:
             if (
@@ -755,6 +745,7 @@ def source_by_id(conn, source_id):
 
 
 def run(limit=5, confirm=False, threshold=0.55, source_id=None):
+    llm_router.bind(connect())
     if confirm and source_id is None and not ollama_available():
         # Sans Ollama, chaque source serait figee en "heuristique seule" et
         # jamais re-analysee. On reporte : elles restent en attente et seront
@@ -767,6 +758,7 @@ def run(limit=5, confirm=False, threshold=0.55, source_id=None):
         return
 
     conn = connect()
+    llm_router.bind(conn)  # budget et journal des appels LLM adosses au Vault
 
     try:
         # Une analyse a blanc ne doit pas modifier le schema d'une base

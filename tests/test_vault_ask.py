@@ -1,6 +1,7 @@
 import _isolation  # noqa: F401  (EN PREMIER : isole le vrai Vault)
 
 import sqlite3
+import os
 import time
 import unittest
 
@@ -244,6 +245,9 @@ class AskTests(AskFixture):
         self.assertIn("RTK", result["answer"])
 
     def test_llm_timeout_returns_deterministic_answer(self):
+        # Synthetiseur local explicite (le defaut est desormais le routeur LLM).
+        os.environ['VAULT_ASK_SYNTHESIZER'] = 'local'
+        self.addCleanup(os.environ.pop, 'VAULT_ASK_SYNTHESIZER', None)
         original = (vault_ask._ollama_available, vault_ask._ollama_chat)
         vault_ask._ollama_available = lambda timeout=1.5: True
         vault_ask._ollama_chat = lambda *a, **k: time.sleep(3) or "trop tard"
@@ -259,6 +263,9 @@ class AskTests(AskFixture):
         self.assertIn("https://vm.tiktok.com/rtk/", result["answer"])
 
     def test_llm_synthesis_is_appended_when_fast(self):
+        # Synthetiseur local explicite (le defaut est desormais le routeur LLM).
+        os.environ['VAULT_ASK_SYNTHESIZER'] = 'local'
+        self.addCleanup(os.environ.pop, 'VAULT_ASK_SYNTHESIZER', None)
         original = (vault_ask._ollama_available, vault_ask._ollama_chat)
         vault_ask._ollama_available = lambda timeout=1.5: True
         vault_ask._ollama_chat = lambda *a, **k: "RTK réduit la lecture inutile [1]."
@@ -328,6 +335,13 @@ class AskApiTests(unittest.TestCase):
         self.assertIn("RTK", data["answer"])
         self.assertEqual(data["llm"]["status"], "disabled")
         self.assertEqual(empty.status_code, 422)
+
+
+def tearDownModule():
+    # Journal du routeur LLM partage : ferme a la fin du module (aucune connexion residuelle).
+    import llm_router
+
+    llm_router.close_shared()
 
 
 if __name__ == "__main__":

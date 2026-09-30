@@ -177,21 +177,16 @@ needs_cloud=true seulement si une vérification externe est indispensable.
     }
 
     try:
-        req = urllib.request.Request(
-            OLLAMA_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
+        import llm_router
 
-        with urllib.request.urlopen(
-            req,
-            timeout=60
-        ) as response:
-            raw = json.load(response)
-
-        result = json.loads(
-            raw["message"]["content"]
-        )
+        router = llm_router.shared()
+        result = router.chat_json(payload["messages"][0]["content"],
+                                  payload["messages"][1]["content"], SCHEMA,
+                                  num_predict=90, task="standard", purpose="mentor_agency")
+        if not isinstance(result, dict):
+            return None
+        last = router.last or {}
+        result["model"] = f"{last.get('provider')}:{last.get('model')}"
 
         result["agents"] = [
             a["name"]
