@@ -583,6 +583,31 @@ def ensure_views(conn, notion):
 
 # ------------------------------------------------------------------ fiches projet
 
+# Horodatage volatile : exclu de l'empreinte (sinon chaque passage reecrit la page).
+SYNC_MARK = "__LIFE_INTELLIGENCE_SYNC_TIMESTAMP__"
+SYNC_LABEL = "Dernière synchro : "
+
+
+def _stamp(blocks):
+    """
+    Copie des blocs ou SEUL le texte « Dernière synchro : <sentinelle> » recoit l'heure
+    reelle ; aucun remplacement global, aucun autre texte touche.
+    """
+    stamped = json.loads(json.dumps(blocks, ensure_ascii=False))
+
+    def walk(items):
+        for item in items or []:
+            body = item.get(item.get("type"), {})
+            for part in body.get("rich_text") or []:
+                text = part.get("text") or {}
+                if text.get("content") == SYNC_LABEL + SYNC_MARK:
+                    text["content"] = SYNC_LABEL + now()
+            walk(body.get("children"))
+
+    walk(stamped)
+    return stamped
+
+
 def _managed(conn, notion, vault_ref, page_id, blocks, *, after=None):
     """Remplace uniquement les blocs geres (trace dans vault.db) d'une page existante."""
     ensure_schema(conn)
@@ -593,7 +618,7 @@ def _managed(conn, notion, vault_ref, page_id, blocks, *, after=None):
         return "unchanged"
     for block_id in json.loads(row["block_ids"]) if row else []:
         notion.delete(block_id)
-    ids = notion.append(page_id, blocks, after=after)
+    ids = notion.append(page_id, _stamp(blocks), after=after)
     conn.execute(
         "INSERT INTO notion_managed_blocks (vault_ref, page_id, block_ids, content_hash, "
         "synced_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(vault_ref) DO UPDATE SET "
@@ -696,7 +721,7 @@ def project_blocks(conn, notion, entity_id, library_links, view_urls):
                bullet(f"Statut : attention {entity['attention_status']}, profil "
                       f"{profile.get('profile_status', 'absent')}, "
                       f"{'actif' if profile.get('active', 1) else 'inactif'}"),
-               bullet(f"Dernière synchro : {now()}")]
+               bullet(SYNC_LABEL + SYNC_MARK)]
     technical = {k: profile.get(k) for k in ("core_topics", "context_topics", "excluded_topics",
                                              "specific_tools", "named_entities", "advisors",
                                              "active", "compound_rules")}

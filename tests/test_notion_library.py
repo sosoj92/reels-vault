@@ -297,6 +297,16 @@ class ViewsProjectsPortalsTests(LibraryCase):
         self.assertEqual(lib.sync_projects(self.conn, self.notion, urls)
                          [self.ids["activity:nexdoor_talent"]], "unchanged")
 
+    def test_sync_timestamp_is_written_only_in_its_field_and_never_hashed(self):
+        blocks = [lib.callout("x", "🧠", [lib.bullet(lib.SYNC_LABEL + lib.SYNC_MARK),
+                                          lib.bullet("Texte contenant SYNC ou " + lib.SYNC_LABEL)])]
+        stamped = lib._stamp(blocks)
+        texts = [c["bulleted_list_item"]["rich_text"][0]["text"]["content"]
+                 for c in stamped[0]["callout"]["children"]]
+        self.assertTrue(texts[0].startswith(lib.SYNC_LABEL + "20"))  # heure reelle
+        self.assertEqual(texts[1], "Texte contenant SYNC ou " + lib.SYNC_LABEL)  # intact
+        self.assertIn(lib.SYNC_MARK, json.dumps(blocks))  # l'original (empreinte) reste stable
+
     def test_portals_are_inserted_without_touching_existing_content(self):
         lib.ensure_library(self.conn, self.notion)
         result = lib.sync_portals(self.conn, self.notion, {})

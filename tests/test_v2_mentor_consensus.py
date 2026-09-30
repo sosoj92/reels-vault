@@ -417,5 +417,12 @@ class LockedRealVaultMentorTests(unittest.TestCase):
             conn.close()
 
 
+def tearDownModule():
+    # Journal du routeur LLM partage : ferme a la fin du module (aucune connexion residuelle).
+    import llm_router
+
+    llm_router.close_shared()
+
+
 if __name__ == "__main__":
     unittest.main()

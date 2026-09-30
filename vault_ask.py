@@ -545,7 +545,8 @@ def synthesize_router(question, sources, agents, timeout):
     info = {"status": "ok" if text else "unavailable", "provider": last.get("provider"),
             "model": last.get("model"), "elapsed_s": round(time.perf_counter() - started, 1)}
     if text:
-        labels = {"local": "locale (Qwen)", "mistral": "Mistral", "anthropic": "Claude"}
+        labels = {"local": "locale (Qwen)", "gemini": "Gemini", "openrouter": "OpenRouter",
+                  "mistral": "Mistral", "anthropic": "Claude"}
         info["label"] = labels.get(last.get("provider"), last.get("provider") or "LLM")
         return _cut(_complete_sentences(" ".join(text.split())), 700), info
     info["reason"] = last.get("reason")

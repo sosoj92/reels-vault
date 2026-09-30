@@ -88,6 +88,13 @@ class SemanticSearchTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.conn.close()
+        # Libere la session ONNX (memoire native) : elle ne doit pas rester chargee
+        # pour le reste de la suite.
+        cls.backend = None
+        embeddings._DEFAULT_BACKEND = None
+        import gc
+
+        gc.collect()
 
     # V2-10 : question formulee differemment du texte source -> source retrouvee.
     def test_paraphrase_finds_source_without_shared_words(self):

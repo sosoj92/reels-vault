@@ -933,7 +933,8 @@ def _backend_available(backend):
 
 def _engine_label(backend):
     last = getattr(backend, "last", None) or {}
-    labels = {"local": "Qwen local", "mistral": "Mistral", "anthropic": "Claude"}
+    labels = {"local": "Qwen local", "gemini": "Gemini", "openrouter": "OpenRouter",
+              "mistral": "Mistral", "anthropic": "Claude"}
     return labels.get(last.get("provider"), "")
 
 

@@ -16,9 +16,10 @@ Mentor Engine                     mentor_proactive.py → mentor_council.py → 
 Agency Agents                     vault_agent_registry.py + vault_orchestrator.py (modes A/B/C)
  ↓
 LLM Router                        llm_router.py
- ├── Qwen / Ollama local (léger, si le PC est libre)
- ├── Mistral API (standard)
- └── Claude API (complexe, optionnelle)
+ ├── Qwen / Ollama local (léger ; seul moteur pour le sensible et hors ligne)
+ ├── Gemini API (standard et complexe)
+ ├── OpenRouter (réserve, budget et plancher de crédit)
+ └── file d'attente (repli ultime : l'analyse reprend plus tard)
  ↓
 vault.db = source de vérité
  ├── Notion   : cockpit, Vault Library, fiches projet, décisions, tâches
@@ -34,7 +35,7 @@ vault.db = source de vérité
 | **Vault** | La mémoire : tout y est écrit en premier (sources, relations, historique). |
 | **Mentor** | Le directeur de cabinet : observe, relie, priorise, et décide s'il faut parler (souvent : non). |
 | **Agents** | Les spécialistes (Recruitment Specialist, Growth Hacker, CFO…) : ils évaluent, ils n'agissent pas. |
-| **LLM Router** | Choisit le moteur adapté (local, Mistral, Claude) sans surcharger le PC ni le budget. |
+| **LLM Router** | Choisit le moteur adapté (Qwen local, Gemini, OpenRouter en réserve) sans surcharger le PC ni le budget. |
 | **Telegram** | La bouche et les oreilles : tu y ajoutes et tu y parles. |
 | **Notion** | Le cockpit : tu y consultes et tu y pilotes. Jamais un second Vault. |
 | **Drive** | Les fichiers. |
