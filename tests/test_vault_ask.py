@@ -207,6 +207,23 @@ class AskTests(AskFixture):
         self.assertFalse(result["llm"]["used"])
         self.assertEqual(result["llm"]["status"], "disabled")
 
+    def test_long_question_keeps_original_and_compacts_retrieval(self):
+        question = (
+            "Analyse mon Life Intelligence System et propose des solutions concretes. "
+            + "Je veux une analyse detaillee avec priorites, contraintes et alternatives. " * 12
+            + "A la fin, concentre la recherche du Vault sur RTK pour economiser des tokens."
+        )
+        result = vault_ask.ask(
+            self.conn, question, llm="off", semantic="off",
+        )
+        self.assertEqual(result["question"], " ".join(question.split()))
+        self.assertLessEqual(
+            len(result["retrieval_query"]), vault_ask.MAX_RETRIEVAL_QUERY_CHARS,
+        )
+        self.assertIn("rtk", result["retrieval_query"])
+        self.assertIn("tokens", result["retrieval_query"])
+        self.assertEqual(result["sources"][0]["source_id"], self.rtk)
+
     def test_no_result_answer_does_not_invent(self):
         result = vault_ask.ask(
             self.conn,
