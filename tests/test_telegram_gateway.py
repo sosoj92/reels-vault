@@ -121,6 +121,16 @@ class ReactiveTests(GatewayCase):
                          "answer:ask")
         self.assertIn("Sourcing de profils data", self.last()["text"])
 
+    def test_long_text_question_is_accepted(self):
+        question = (
+            "Analyse mon Life Intelligence System et les solutions possibles. "
+            + "Je veux des options simples, peu couteuses et faciles a maintenir. " * 12
+            + "Concentre la recherche sur les tokens et leur consommation."
+        )
+        self.assertEqual(self.gw.handle_update(msg(question)), "answer:ask")
+        self.assertTrue(self.telegram.sent)
+        self.assertNotIn("500", self.last()["text"])
+
     def test_voice_is_transcribed_then_answered(self):
         self.telegram.files["voice-1"] = "Que sais-je sur le sourcing de profils data ?".encode()
         update = {"update_id": 9, "message": {"message_id": 9, "from": {"id": USER},
@@ -309,6 +319,18 @@ class RestartTests(GatewayCase):
         restarted = self.make_gateway(conn=self.conn)
         tg.run(restarted, once=True)  # les updates deja traitees ne sont pas rejouees
         self.assertEqual(len(self.telegram.sent), sent)
+
+    def test_processing_error_is_reported_in_telegram(self):
+        def broken(_conn, _question, llm="off"):
+            raise RuntimeError("boom")
+
+        self.gw.ask_fn = broken
+        self.telegram.updates = [msg("question qui plante", message_id=21)]
+        tg.run(self.gw, once=True)
+        self.assertEqual(self.gw.state("offset"), "22")
+        self.assertTrue(any(
+            "pas pu traiter ce message" in item["text"] for item in self.telegram.sent
+        ))
 
 
 class SetupTests(unittest.TestCase):
