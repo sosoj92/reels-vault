@@ -43,6 +43,7 @@ DEFAULT_LLM_TIMEOUT = float(os.environ.get("VAULT_ASK_LLM_TIMEOUT", "25"))
 
 MAX_SOURCES = 5
 MIN_RELATIVE_SCORE = 0.35
+MAX_RETRIEVAL_QUERY_CHARS = 500
 
 # Domaines ou la prudence epistemique est obligatoire.
 _SENSITIVE_ROUTES = {"research_evidence", "health", "finance", "legal"}
@@ -203,7 +204,7 @@ _ASSESSMENT_LABELS = {
 
 def render_answer(question, sources, *, mentor=None, sensitive=False,
                   capabilities=None, agents=None, mode="ask", related=None,
-                  assessments=None):
+                  assessments=None, term_question=None):
     """
     Reponse deterministe : uniquement des faits presents dans le Vault.
 
@@ -251,7 +252,7 @@ def render_answer(question, sources, *, mentor=None, sensitive=False,
     # "Pourquoi c'est utile" : uniquement des signaux deja calcules.
     reasons = []
     origins = []
-    for item in context_layer.query_terms(question):
+    for item in context_layer.query_terms(term_question or question):
         if item["term"] == item["origin"] and item["origin"] not in origins:
             origins.append(item["origin"])
     matched_origins = [
@@ -637,6 +638,70 @@ def clean_question(question):
     return text or " ".join(str(question or "").split())
 
 
+def compact_retrieval_query(question, max_chars=MAX_RETRIEVAL_QUERY_CHARS):
+    """
+    Reduit un long message utilisateur en requete de retrieval bornee.
+
+    Le message original reste intact pour l'orchestration et les agents. Seule
+    la recherche dans le Vault recoit cette version compacte : mots utiles
+    uniques, avec une part du debut et de la fin pour ne pas perdre un sujet
+    ou un nom cite tard dans le prompt.
+    """
+    cleaned = clean_question(question)
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    folded = context_layer._fold(cleaned)
+    stopwords = context_layer._STOPWORDS | context_layer._RECALL_STOPWORDS
+    seen = set()
+    useful = []
+    generic = []
+    for token in folded.split():
+        if len(token) < 2 or token in stopwords:
+            continue
+        if token.isdigit() and len(token) < 3:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        (generic if token in context_layer._GENERIC_TOPIC_WORDS else useful).append(token)
+
+    terms = useful + generic
+    if not terms:
+        return cleaned[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:.") or cleaned[:max_chars]
+
+    # Environ 75 % du budget pour le debut, 25 % pour la fin.
+    front_budget = max(1, int(max_chars * 0.75))
+    front = []
+    used = 0
+    index = 0
+    while index < len(terms):
+        extra = len(terms[index]) + (1 if front else 0)
+        if used + extra > front_budget:
+            break
+        front.append(terms[index])
+        used += extra
+        index += 1
+
+    tail = []
+    used_total = used
+    front_set = set(front)
+    for token in reversed(terms[index:]):
+        if token in front_set:
+            continue
+        extra = len(token) + (1 if front or tail else 0)
+        if used_total + extra > max_chars:
+            continue
+        tail.append(token)
+        used_total += extra
+    tail.reverse()
+
+    compact = " ".join(front + tail).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:.")
+
+
 def project_intent(conn, question):
     """
     Intention describe_project : « que sais-tu de Nexdoor Talent ? », « ou en est X ? »,
@@ -796,6 +861,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
     question = " ".join(str(question or "").split())
     if not question:
         raise ValueError("question is required")
+    retrieval_question = compact_retrieval_query(question)
 
     # Question sur un projet connu : vue projet construite depuis le Vault.
     project_id = project_intent(conn, question)
@@ -805,7 +871,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
             return described
 
     pack = context_layer.build_context_pack(
-        conn, clean_question(question), direct_source_limit=max(max_sources * 2, 8),
+        conn, retrieval_question, direct_source_limit=max(max_sources * 2, 8),
         semantic=semantic, semantic_backend=semantic_backend,
     )
     lexical = [
@@ -823,7 +889,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
     retrieval_ms = round((time.perf_counter() - started) * 1000)
 
     agents, routes = _agent_lenses(question, agent)
-    sensitive = _is_sensitive(question, sources + related, routes)
+    sensitive = _is_sensitive(retrieval_question, sources + related, routes)
     mentor = _mentor_status(conn, [s["source_id"] for s in sources])
     assessments = _claim_assessments(conn, [s["source_id"] for s in sources])
 
@@ -837,6 +903,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
         mode=mode,
         related=related,
         assessments=assessments,
+        term_question=retrieval_question,
     )
 
     synthesis = None
@@ -869,6 +936,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
 
     return {
         "question": question,
+        "retrieval_query": retrieval_question,
         "mode": mode,
         "answer": answer,
         "sources": [
