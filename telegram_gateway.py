@@ -531,6 +531,79 @@ class Gateway:
         return "project_linked"
 
     # -------------------------------------------------------------- questions
+    def project_consult_context(self, project_ids):
+        """Contexte projet compact transmis aux agents lors d'une consultation directe."""
+        if not project_ids:
+            return None
+        import mentor_project_profiles as profiles
+        import vault_ask
+
+        projects = []
+        for project_id in list(dict.fromkeys(project_ids))[:2]:
+            profile = profiles.get_profile(self.conn, project_id) or {}
+            view = vault_ask.project_view(self.conn, project_id) or {}
+            entity = view.get("entity") or {}
+            topics = []
+            for item in profile.get("core_topics") or []:
+                topic = item.get("topic") if isinstance(item, dict) else str(item)
+                if topic:
+                    topics.append(topic)
+            projects.append({
+                "id": project_id,
+                "name": profile.get("project_name") or entity.get("name")
+                        or _project_name(self.conn, project_id),
+                "description": profile.get("description"),
+                "core_topics": topics[:8],
+                "tasks": [
+                    {k: task.get(k) for k in ("id", "title", "status", "due_date")}
+                    for task in (view.get("tasks") or [])[:5]
+                ],
+                "suggestions": [
+                    {k: sug.get(k) for k in ("suggestion_id", "title", "status")}
+                    for sug in (view.get("suggestions") or [])[-5:]
+                ],
+            })
+        return {"projets": projects} if projects else None
+
+    @staticmethod
+    def answer_chunks(text, limit=3800):
+        """Decoupe sans perte les longues reponses avant la limite Telegram."""
+        text = str(text or "").strip()
+        if not text:
+            return [""]
+        chunks = []
+        rest = text
+        while len(rest) > limit:
+            window = rest[:limit]
+            cut = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(". "))
+            if cut < int(limit * 0.55):
+                cut = window.rfind(" ")
+            if cut < int(limit * 0.4):
+                cut = limit
+            else:
+                cut += 1
+            chunks.append(rest[:cut].strip())
+            rest = rest[cut:].strip()
+        if rest:
+            chunks.append(rest)
+        return chunks or [""]
+
+    def deliver_answer(self, text, *, placeholder=None, reply_to=None):
+        """Envoie toute la reponse, en plusieurs messages si necessaire."""
+        chunks = self.answer_chunks(text)
+        message_ids = []
+        start = 0
+        if placeholder is not None:
+            try:
+                self.client.edit_message(self.chat_id, placeholder, chunks[0])
+                message_ids.append(placeholder)
+                start = 1
+            except telegram_api.TelegramError:
+                start = 0
+        for index in range(start, len(chunks)):
+            message_ids.append(self.send(chunks[index], reply_to=reply_to if index == 0 else None))
+        return message_ids
+
     def answer(self, question, *, anchor=None, adjustment=None, base=None, reply_to=None):
         import mentor_council as council
 
@@ -541,11 +614,12 @@ class Gateway:
         if adjustment and base and not anchor:
             anchor = base.get("payload", {}).get("anchor")
         grounded = self.grounding(anchor) if anchor else None
+        mentioned_projects = council.projects_in_text(self.conn, question)
         project_ids = [grounded["project_id"]] if grounded and grounded.get("project_id") else []
+        for pid in mentioned_projects:
+            if pid not in project_ids:
+                project_ids.append(pid)
         if grounded:
-            for pid in council.projects_in_text(self.conn, question):
-                if pid not in project_ids:
-                    project_ids.append(pid)  # enrichit, sans remplacer la source active
             grounded["agent_context"]["projets_mentionnes"] = [
                 _project_name(self.conn, pid) for pid in project_ids]
 
@@ -568,7 +642,7 @@ class Gateway:
         else:
             wants_agents = any(marker in fold(question) for marker in ADVICE_MARKERS) \
                 or bool(council.agents_in_text(question)) \
-                or bool(council.projects_in_text(self.conn, question)) \
+                or bool(mentioned_projects) \
                 or grounded is not None
             mode, agents = council.select_for_question(
                 self.conn, question, project_ids=project_ids) if wants_agents else (None, [])
@@ -583,49 +657,63 @@ class Gateway:
                 mode, agents = None, []
             if result.get("route") == "project_view":
                 self._anchor_project(result["project_id"])
-        lines = [result["answer"]]
         panel = None
         placeholder = None
+        consultation_context = grounded["agent_context"] if grounded \
+            else self.project_consult_context(project_ids)
         if agents:
-            # Reponse immediate : l'analyse (LLM) peut prendre quelques dizaines de secondes.
             placeholder = self.send("🧠 Analyse en cours…", reply_to=reply_to)
-            ready = self.backend is not None and _backend_available(self.backend)
+            # Les longues demandes structurees meritent le chemin complexe : Gemini si configure,
+            # sinon OpenRouter. Les consultations courtes gardent la chaine standard/local.
+            consult_task = "complex" if len(question) > 500 or question.count("\n") >= 5 \
+                else "standard"
+            ready = self.backend is not None and _backend_available(self.backend, consult_task)
             if ready:
                 panel = council.answer_with_agents(
                     self.conn, self.backend, question, agents, vault_answer=result["answer"],
                     sources=result["sources"], mode=mode or "B",
                     session_id=f"telegram:{self.chat_id}",
-                    context=grounded["agent_context"] if grounded else None,
+                    context=consultation_context, task=consult_task,
                 )
+
+        if panel and panel["opinions"]:
+            # Priorite a la reponse utile : le dump complet du retrieval reste dans le Vault.
+            lines = ["🧠 Analyse"]
+            if panel.get("synthesis"):
+                lines.append(panel["synthesis"])
             lines.append("")
-            if panel and panel["opinions"]:
-                # Le moteur reel reste dans les journaux techniques, pas dans la reponse.
-                lines.append("🤝 Agents consultes (mode " + (mode or "B") + ") :")
-            else:
-                why = ("aucun moteur LLM disponible (Qwen local occupe ou injoignable, "
-                       "cloud non configure ou hors budget)") if not ready \
-                    else "reponse du moteur LLM inexploitable"
-                lines.append(f"🤝 Agents selectionnes mais non consultes : {why}.")
-            for agent in agents:
-                lines.append(f"• {agent['name']} — {agent['reason']}")
-            if panel and panel["opinions"]:
-                for opinion in panel["opinions"]:
-                    lines.append(f"\n{opinion['agent']} : {opinion['opinion']}")
-                if panel.get("synthesis"):
-                    lines.append(f"\nSynthèse : {panel['synthesis']}")
-        if placeholder is not None:
-            try:
-                self.client.edit_message(self.chat_id, placeholder, "\n".join(lines))
-                message_id = placeholder
-            except telegram_api.TelegramError:
-                message_id = self.send("\n".join(lines), reply_to=reply_to)
+            lines.append("🤝 Regards consultes :")
+            reasons = {a["name"]: a["reason"] for a in agents}
+            for opinion in panel["opinions"]:
+                reason = reasons.get(opinion["agent"])
+                suffix = f" ({reason})" if reason else ""
+                lines.append(f"\n{opinion['agent']}{suffix} : {opinion['opinion']}")
+            if result["sources"]:
+                lines.append("")
+                lines.append("📚 Sources Vault retenues :")
+                for source in result["sources"][:3]:
+                    title = source.get("title") or f"source {source.get('source_id')}"
+                    url = source.get("url")
+                    lines.append(f"• {str(title)[:110]}" + (f" — {url}" if url else ""))
         else:
-            message_id = self.send("\n".join(lines), reply_to=reply_to)
+            lines = [result["answer"]]
+            if agents:
+                why = ("aucun moteur LLM disponible pour cette consultation "
+                       "(configuration, budget ou connectivite)") if not ready \
+                    else "reponse du moteur LLM inexploitable"
+                lines.append("")
+                lines.append(f"🤝 Agents selectionnes mais non consultes : {why}.")
+                for agent in agents:
+                    lines.append(f"• {agent['name']} — {agent['reason']}")
+
+        message_ids = self.deliver_answer("\n".join(lines), placeholder=placeholder,
+                                          reply_to=reply_to)
         source_ids = [s.get("source_id") for s in result["sources"] if s.get("source_id")]
         suggestion_id = grounded.get("suggestion_id") if grounded else None
-        self.remember(message_id, "answer", suggestion_id=suggestion_id, question=question,
-                      agents=[a["name"] for a in agents], mode=mode,
-                      payload={"sources": source_ids, "anchor": anchor})
+        for message_id in message_ids:
+            self.remember(message_id, "answer", suggestion_id=suggestion_id, question=question,
+                          agents=[a["name"] for a in agents], mode=mode,
+                          payload={"sources": source_ids, "anchor": anchor})
         if suggestion_id:
             self.set_active("suggestion", suggestion_id=suggestion_id,
                             project_id=grounded.get("project_id"))
@@ -721,7 +809,8 @@ class Gateway:
             return self.ask_fn(self.conn, question, llm=llm)
         import vault_ask
 
-        return vault_ask.ask(self.conn, question, mode="consult", llm=llm)
+        # Telegram gere deja la consultation Agency ; Ask reste un retrieval pur.
+        return vault_ask.ask(self.conn, question, mode="ask", llm=llm)
 
     def _publish_question(self, question, sources):
         import mentor_proactive
@@ -993,9 +1082,9 @@ class Gateway:
                 pass
 
 
-def _backend_available(backend):
+def _backend_available(backend, task="standard"):
     try:
-        return backend.available(task="standard")
+        return backend.available(task=task)
     except TypeError:
         return backend.available()
 
