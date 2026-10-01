@@ -51,7 +51,8 @@ TikTok / Instagram → Partager → MacroDroid → inbox.txt → Syncthing
 
 ## Installer, vérifier, sauvegarder, restaurer
 
-Tout est dans [`deployment-kit/`](deployment-kit/README.md). Versions exactes :
+Tout est dans [`deployment-kit/`](deployment-kit/README.md) — commencer par
+[`deployment-kit/00_START_HERE.md`](deployment-kit/00_START_HERE.md). Versions exactes :
 [`deployment-kit/lis.lock.json`](deployment-kit/lis.lock.json).
 
 > Sur un Windows neuf, autorise d'abord les scripts locaux :

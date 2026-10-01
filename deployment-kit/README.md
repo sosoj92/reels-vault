@@ -1,7 +1,69 @@
-# Deployment kit du Life Intelligence System
+# Life Intelligence System — Deployment Kit
 
-Rendre le LIS **reproductible, installable, vérifiable, sauvegardable et restaurable**
-sur Windows. Aucune fonctionnalité nouvelle : uniquement l'existant, figé et outillé.
+Ce dossier documente **et outille** la reproduction, l'installation, l'utilisation, la
+migration et la restauration du Life Intelligence System (LIS) sur Windows.
+
+Il décrit la recette finale qui a survécu, pas l'historique de tous les essais. Aucune
+fonctionnalité nouvelle : uniquement l'existant, figé (`lis.lock.json`), vérifiable
+(`CHECK_LIS.ps1`), sauvegardable (`backup_lis.ps1`) et restaurable (`restore_lis.ps1`).
+
+## Deux parcours
+
+| Parcours | Résultat | Automatisé par | Guide | Prompt Claude Code |
+|---|---|---|---|---|
+| **A — Nouvelle installation** : PC Windows neuf → Vault neuf | `LIS READY` | `setup_lis.ps1` puis `CHECK_LIS.ps1` | `01_INSTALL_WINDOWS.md` | `prompts/01_INSTALL_WINDOWS.md` |
+| **B — Restauration / migration** : nouveau PC → GitHub + backup personnel | `LIS RESTORED` | `restore_lis.ps1` (appelle `setup_lis.ps1` et `CHECK_LIS.ps1`) | `10_BACKUP_RESTORE.md`, `11_MIGRATE_NEW_PC.md` | `prompts/02_RESTORE_EXISTING_LIS.md` |
+
+Les scripts font tout ce qui est automatisable ; les étapes humaines (clés masquées,
+BotFather, téléphone, voix, connecteurs ChatGPT) sont signalées `MANUAL TEST REQUIRED`
+ou `NOT CONFIGURED`, et détaillées dans les guides numérotés.
+
+## Architecture de référence
+- GitHub contient le code.
+- `vault.db` est la mémoire canonique.
+- Notion est le cockpit/projection.
+- Telegram est l'interface rapide/mobile.
+- ChatGPT est une interface d'analyse riche via connecteurs, pas la mémoire.
+- Jarvis est l'interface vocale.
+- Claude Code est l'outil principal de construction, installation, maintenance et diagnostic.
+- LLM Router garde les modèles interchangeables.
+- Agency Agents sont des playbooks de raisonnement, pas des modèles.
+- MacroDroid + Syncthing forment le pipeline mobile Android.
+- Tailscale ne fait pas partie de la stack finale.
+- Mistral n'est pas un fournisseur runtime de référence.
+
+## Ordre de lecture
+1. 00_START_HERE.md
+2. 13_STACK_MATRIX.md
+3. 01_INSTALL_WINDOWS.md
+4. 02_LLM_AND_MODELS.md
+5. 03_TELEGRAM.md
+6. 04_NOTION_AND_CHATGPT.md
+7. 05_JARVIS.md
+8. 06_ANDROID_MACRODROID_SYNCTHING.md (+ `android/` : export MacroDroid, Syncthing)
+9. 07_WINDOWS_AUTOMATION.md
+10. 08_SECURITY.md
+11. 09_HEALTH_CHECK.md
+12. 10_BACKUP_RESTORE.md
+13. 11_MIGRATE_NEW_PC.md
+14. 12_TROUBLESHOOTING.md
+15. 14_COMMAND_REFERENCE.md
+
+Le dossier `prompts/` contient les prompts maîtres pour Claude Code. Ce README sert de
+référence détaillée des scripts (sections ci-dessous).
+
+## Sources de vérité techniques
+Prioriser FINAL_ARCHITECTURE.md, docs/INGESTION.md, docs/LLM_ROUTER.md,
+docs/NOTION_VAULT_LIBRARY.md, docs/MENTOR_PROACTIVE_V3.md,
+docs/AGENCY_SECURITY_SELF_IMPROVEMENT.md, UPSTREAMS.md, .env.example,
+`deployment-kit/lis.lock.json` et les scripts actuels (`setup_*.ps1`, `CHECK_LIS.ps1`,
+`backup_lis.ps1`, `restore_lis.ps1`).
+
+Le README.md racine décrit désormais le LIS actuel ; l'ancien tutoriel Reels Vault
+(Cowork/iPhone/iCloud) est conservé comme **legacy** dans
+`docs/legacy/REELS_VAULT_TUTORIAL.md` et ne fait plus référence.
+
+## Outillage
 
 | Fichier | Rôle |
 |---|---|
