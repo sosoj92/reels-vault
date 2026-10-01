@@ -85,11 +85,23 @@ Relevant upstream references include:
 - docs/costs.md
 - docs/cockpit.md
 
-## Setup / update
+## Setup / update (pinned)
 
-Run: .\setup_upstreams.ps1
+Exact commits are pinned in `deployment-kit/lis.lock.json`.
 
-The script shallow-clones or refreshes all three upstream repositories.
+    .\setup_upstreams.ps1 -Audit     # compare installed SHAs with the lock, no change
+    .\setup_upstreams.ps1            # clone / checkout the exact locked SHA
+
+The script never follows origin/main, never runs `reset --hard` or `git clean`, and
+blocks (instead of overwriting) when local modifications outside the Jarvis bridge
+would be at risk (`-Force` saves them as a patch in `backups\upstream-patches\` first).
+It then re-applies the Jarvis Voice Bridge (`install_jarvis_voice_bridge.py`,
+idempotent; `--check` is read-only).
+
+Updating an upstream is a deliberate change: review the new commit with
+`python vault_security_gate.py <checkout>`, edit the SHA in the lock file, run
+`.\setup_upstreams.ps1 -DryRun`, then apply, test and commit the lock on a branch.
+See `deployment-kit/README.md` (UPSTREAM LOCK).
 
 ## Provider rule
 

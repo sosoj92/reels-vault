@@ -47,3 +47,11 @@ mentor_proactive.enabled
 
 # Inbox locale (fichiers personnels a ingerer) et fichiers recus par Telegram
 inbox/
+
+# Deployment kit : rapports locaux (chemins et etat de la machine) jamais versionnes
+deployment-kit/reports/*
+!deployment-kit/reports/README.md
+# Backups LIS et secrets chiffres : jamais dans Git
+LIS-BACKUP-*/
+*.lisenc
+vault.db.restoring

@@ -1,0 +1,113 @@
+name: LIS deployment check
+
+# Couche deployment du LIS (lock, setup, Health Check, backup/restore) sur Windows.
+# Aucun secret, aucun Telegram/Notion reel, aucun telephone, aucun provider cloud :
+# uniquement des bases SQLite factices et des dossiers temporaires.
+# Non teste ici (materiel / authentification) : voir deployment-kit/README.md
+# section "Tests reels".
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**"]
+    paths:
+      - "*.ps1"
+      - "deployment-kit/**"
+      - "tests/deployment/**"
+      - "install_jarvis_voice_bridge.py"
+      - "integrations/jarvis/**"
+      - "requirements-vault.txt"
+      - ".github/workflows/lis-deployment-check.yml"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deployment:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-vault.txt
+
+      - name: Dependances du Vault (sans modele, sans cle)
+        run: python -m pip install -r requirements-vault.txt
+
+      - name: Lock file
+        run: |
+          python -c "import json,re; l=json.load(open('deployment-kit/lis.lock.json',encoding='utf-8')); assert l['schema']=='lis-lock' and l['schema_version']==1; assert all(re.fullmatch('[0-9a-f]{40}',u['sha']) for u in l['upstreams']); print('lock OK :', [(u['name'], u['sha'][:10]) for u in l['upstreams']])"
+
+      - name: Syntaxe PowerShell (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($f in (Get-ChildItem -Path . -Include *.ps1,*.psm1 -Recurse -File | Where-Object { $_.FullName -notmatch '\\(external|\.venv|backups)\\' })) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            if ($errors.Count) { $failed = $true; Write-Host "ERREUR $($f.Name) : $($errors[0].Message)" } else { Write-Host "OK $($f.Name)" }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Aucun secret ni vault.db suivi
+        run: python deployment-kit/lib/lis_deploy.py secret-scan --root .
+
+      - name: Tests deployment (bases factices, dossiers temporaires)
+        run: python -m unittest discover -s tests -p "test_deploy_*.py" -v
+
+      - name: setup_lis.ps1 -DryRun (runner vierge, informatif)
+        shell: powershell
+        run: |
+          .\setup_lis.ps1 -DryRun -ReportDir "$env:RUNNER_TEMP\lis-reports"
+          Write-Host "code DryRun : $LASTEXITCODE (1/2 attendus sur un runner sans LIS installe)"
+          exit 0
+
+      - name: Faux LIS (base SQLite factice)
+        shell: python
+        run: |
+          import os, shutil, sqlite3
+          lis = os.path.join(os.environ["RUNNER_TEMP"], "fake-lis")
+          os.makedirs(os.path.join(lis, "deployment-kit"), exist_ok=True)
+          shutil.copy("deployment-kit/lis.lock.json", os.path.join(lis, "deployment-kit"))
+          conn = sqlite3.connect(os.path.join(lis, "vault.db"))
+          conn.executescript("""
+              CREATE TABLE contents(id INTEGER PRIMARY KEY, title TEXT);
+              CREATE TABLE actions(id INTEGER PRIMARY KEY);
+              CREATE TABLE notes(id INTEGER PRIMARY KEY);
+              CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);
+              INSERT INTO contents(title) VALUES ('factice');
+          """)
+          conn.commit()
+          conn.close()
+
+      - name: Backup puis restore isoles
+        shell: powershell
+        run: |
+          $lis = Join-Path $env:RUNNER_TEMP "fake-lis"
+          $bkDir = Join-Path $env:RUNNER_TEMP "bk"
+          $restored = Join-Path $env:RUNNER_TEMP "restored"
+          & ./backup_lis.ps1 -Root $lis -Destination $bkDir -NoSystem
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $bk = Get-ChildItem $bkDir -Directory | Select-Object -First 1
+          & ./restore_lis.ps1 -BackupPath $bk.FullName -VerifyOnly -NoSystem
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & ./restore_lis.ps1 -BackupPath $bk.FullName -Root $restored -NoSystem -SkipInstall -SkipHealthCheck
+          if ($LASTEXITCODE -ne 1) { exit 1 }
+          exit 0
+
+      - name: Base restauree integre
+        shell: python
+        run: |
+          import os, sqlite3
+          db = os.path.join(os.environ["RUNNER_TEMP"], "restored", "vault.db")
+          conn = sqlite3.connect(db)
+          assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+          assert conn.execute("SELECT COUNT(*) FROM contents").fetchone()[0] == 1
+          print("restore OK")

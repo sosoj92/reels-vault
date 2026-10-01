@@ -1,0 +1,103 @@
+{
+  "schema": "lis-lock",
+  "schema_version": 1,
+  "generated_utc": "2026-10-01T14:00:00Z",
+  "note": "Versions EXACTES validees sur le PC de reference. Toute mise a jour d'un upstream passe par Security Gate + revue, puis par une modification volontaire de ce fichier.",
+  "lis": {
+    "repository": "Roseytech/reels-vault (prive)",
+    "validated_sha": "f37fce93a6b92bfc768e6f41323fde744fc6c2f6",
+    "validated_ref": "main (merge fix/telegram-long-prompts)"
+  },
+  "python": {
+    "reference": "3.14.4",
+    "minimum": "3.12",
+    "winget_id": "Python.Python.3.14",
+    "venv": ".venv",
+    "requirements_lock": "deployment-kit/requirements-lock.txt",
+    "requirements_fallback": "requirements-vault.txt",
+    "fallback_extra_packages": ["yt-dlp", "gallery-dl", "faster-whisper"],
+    "critical_imports": ["sqlite3", "fastapi", "uvicorn", "numpy", "onnxruntime", "tokenizers", "yt_dlp", "faster_whisper"],
+    "optional_imports": ["gallery_dl", "anthropic", "openpyxl", "requests"]
+  },
+  "upstreams": [
+    {
+      "name": "agency-agents",
+      "url": "https://github.com/msitarzewski/agency-agents.git",
+      "path": "external/agency-agents",
+      "sha": "053ddbbf392a1688fc7043d81529f47ef2cf86c8",
+      "role": "playbooks Agency (vault_agent_registry.py)",
+      "managed_paths": []
+    },
+    {
+      "name": "reels-vault-upstream",
+      "url": "https://github.com/sosoj92/reels-vault.git",
+      "path": "external/reels-vault-upstream",
+      "sha": "9fa007b51de4f129e38519183bffbf153947bfd4",
+      "role": "reference ingestion (revue selective, jamais copie automatique)",
+      "managed_paths": []
+    },
+    {
+      "name": "jarvis-assistant-vocal",
+      "url": "https://github.com/sosoj92/jarvis-assistant-vocal.git",
+      "path": "external/jarvis-assistant-vocal",
+      "sha": "32faa786155a010d1a8a3ef47f95be46871d76ec",
+      "role": "interface vocale du LIS (Voice Bridge)",
+      "python": "3.13",
+      "winget_python_id": "Python.Python.3.13",
+      "managed_paths": [
+        "core/routage_intentions.py",
+        "tools/brief.py",
+        "tools/life_intelligence.py",
+        "tools/calendar_state_sync.py",
+        "tools/dynamic_planner.py",
+        "tools/mentor_calendar.py",
+        "tools/replanning_proposer.py",
+        "tools/replanning_watch.py",
+        "tools/weekly_horizon.py"
+      ]
+    }
+  ],
+  "ollama": {
+    "winget_id": "Ollama.Ollama",
+    "validated_version": "0.34.4",
+    "endpoint": "http://127.0.0.1:11434",
+    "required_model": "qwen3:1.7b",
+    "optional_models": ["qwen3:4b"]
+  },
+  "embeddings": {
+    "model": "multilingual-e5-small",
+    "model_id": "multilingual-e5-small-q8",
+    "path": "models/multilingual-e5-small",
+    "installer": "setup_semantic_model.ps1",
+    "onnx_file": "onnx/model_quantized.onnx",
+    "onnx_sha256": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
+  },
+  "system_tools": {
+    "git": {"winget_id": "Git.Git", "validated_version": "2.53.0"},
+    "ffmpeg": {"winget_id": "Gyan.FFmpeg", "validated_version": "9.0.2"},
+    "syncthing": {"winget_id": "Syncthing.Syncthing", "validated_version": "2.1.5"}
+  },
+  "vault": {
+    "db": "vault.db",
+    "sqlite_validated_version": "3.50.4",
+    "required_tables": ["contents", "actions", "notes", "meta"],
+    "recommended_tables": ["intelligence_sources", "mentor_suggestions", "telegram_state"]
+  },
+  "windows_tasks": {
+    "ingestion": ["Reels Vault - Hourly", "Reels Vault Ingest"],
+    "telegram_gateway": "Reels Vault - Telegram Gateway",
+    "mentor_daily": "Reels Vault - Mentor Daily",
+    "api_optional": "Reels Vault API"
+  },
+  "android": {
+    "pipeline": "TikTok/Instagram -> Partager -> MacroDroid -> inbox.txt -> Syncthing -> mobile-inbox/inbox.txt -> inbox.bat -> ingestion -> vault.db",
+    "syncthing_folder_label": "Reels Vault Inbox",
+    "windows_folder": "mobile-inbox",
+    "windows_folder_type": "receiveonly",
+    "inbox_file": "mobile-inbox/inbox.txt"
+  },
+  "backup": {
+    "format": "lis-backup",
+    "format_version": 1
+  }
+}

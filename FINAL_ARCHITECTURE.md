@@ -74,3 +74,5 @@ Agents portables, Security Gate, auto-amélioration : `docs/AGENCY_SECURITY_SELF
 
 Détails : `docs/MENTOR_PROACTIVE_V3.md`, `docs/LLM_ROUTER.md`, `docs/INGESTION.md`,
 `docs/NOTION_VAULT_LIBRARY.md`.
+
+Installation, Health Check, backup, restauration et versions figées : `deployment-kit/README.md`.
