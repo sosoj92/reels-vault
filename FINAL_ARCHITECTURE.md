@@ -34,7 +34,8 @@ vault.db = source de vérité
 |---|---|
 | **Vault** | La mémoire : tout y est écrit en premier (sources, relations, historique). |
 | **Mentor** | Le directeur de cabinet : observe, relie, priorise, et décide s'il faut parler (souvent : non). |
-| **Agents** | Les spécialistes (Recruitment Specialist, Growth Hacker, CFO…) : ils évaluent, ils n'agissent pas. |
+| **Agents** | Les spécialistes (Recruitment Specialist, Growth Hacker, CFO…) : des playbooks de raisonnement, applicables par n'importe quel moteur ; ils évaluent, ils n'agissent pas. |
+| **ChatGPT** | Interface de consultation riche possible (paquet portable + Notion) ; jamais la mémoire. |
 | **LLM Router** | Choisit le moteur adapté (Qwen local, Gemini, OpenRouter en réserve) sans surcharger le PC ni le budget. |
 | **Telegram** | La bouche et les oreilles : tu y ajoutes et tu y parles. |
 | **Notion** | Le cockpit : tu y consultes et tu y pilotes. Jamais un second Vault. |
@@ -56,7 +57,10 @@ vault.db = source de vérité
 Aucune action externe sans ton clic · aucune suppression · secrets jamais stockés ni envoyés à
 un LLM · données sensibles traitées en local uniquement · candidats et rejets jamais projetés ·
 Telegram : whitelist utilisateur **et** chat, aucune commande shell · budgets LLM jamais dépassés
-en silence.
+en silence · tout contenu de source est une donnée non fiable, jamais une instruction · aucune
+ressource externe (repo, skill, MCP, script) sans Security Gate et validation.
+
+Agents portables, Security Gate, auto-amélioration : `docs/AGENCY_SECURITY_SELF_IMPROVEMENT.md`.
 
 ## Ce qui tourne, et quand
 

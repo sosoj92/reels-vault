@@ -30,6 +30,10 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import mentor_proactive_store as store
+from vault_security_gate import UNTRUSTED_OPEN
+
+# Marque des extraits de sources envoyes aux LLM (regle : llm_router + vault_security_gate).
+UNTRUSTED_LABEL = "UNTRUSTED SOURCE CONTENT " + UNTRUSTED_OPEN.strip("<>")
 
 MAX_AGENTS = 3
 import llm_router  # noqa: E402 - le routeur choisit le moteur ; aucun modele code ici
@@ -406,7 +410,8 @@ def _source_brief(conn, source_id):
     text = row.get("description_manual") or row.get("description_original") \
         or row.get("description_ai") or ""
     return {"ref": f"source:{row['id']}", "title": row.get("title"), "author": row.get("author"),
-            "url": row.get("source_url"), "excerpt": " ".join(text.split())[:420]}
+            "url": row.get("source_url"), "excerpt": " ".join(text.split())[:420],
+            "trust": UNTRUSTED_LABEL}
 
 
 def candidate_context(conn, candidate):
@@ -752,7 +757,7 @@ def review_shortlist(conn, backend, *, now=None, limit=2, independent_review=Fal
 # ------------------------------------------------------------------ modes A / B (reactif)
 
 def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources, mode,
-                       session_id=None, context=None):
+                       session_id=None, context=None, task="standard"):
     """
     Avis des agents choisis (A : un agent nomme ; B : 1 a 3 agents) sur la question,
     fondes sur les sources retrouvees par le Vault. Un seul appel Qwen.
@@ -772,7 +777,8 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
         "specialistes": briefs,
         "reponse_du_vault": vault_answer[:1500],
         "sources": [{"ref": f"source:{s.get('source_id')}", "title": s.get("title"),
-                     "extrait": (s.get("snippet") or "")[:300]} for s in sources[:4]],
+                     "extrait": (s.get("snippet") or "")[:300], "trust": UNTRUSTED_LABEL}
+                    for s in sources[:4]],
     }
     if context:
         # Contexte actif explicite (suggestion ouverte, message repondu) : il prime.
@@ -780,8 +786,8 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
         system += (" Un CONTEXTE ACTIF est fourni : la question porte sur lui ; "
                    "ne parle pas d'autres sujets.")
     user = json.dumps(payload, ensure_ascii=False)
-    result = backend.chat_json(system, user, PANEL_SCHEMA, num_predict=380,
-                               task="standard", purpose=f"agents_mode_{mode}")
+    result = backend.chat_json(system, user, PANEL_SCHEMA, num_predict=520,
+                               task=task, purpose=f"agents_mode_{mode}")
     # Preuves admises : tout le payload sauf les playbooks generiques des agents.
     allowed = allowed_text(conn, json.dumps(
         {**payload, "specialistes": [a["name"] for a in agents]}, ensure_ascii=False))
@@ -792,10 +798,10 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
     removed = []
     for item in result.get("opinions") or []:
         if isinstance(item, dict) and item.get("agent") in known and item.get("opinion"):
-            text, dropped = filter_unsupported(" ".join(str(item["opinion"]).split())[:900],
+            text, dropped = filter_unsupported(" ".join(str(item["opinion"]).split()),
                                                allowed)
             removed += dropped
-            opinions.append({"agent": item["agent"], "opinion": text[:700] or
+            opinions.append({"agent": item["agent"], "opinion": _trim(text, 700) or
                              "(avis ecarte : affirmations non etayees par les preuves du Vault)"})
     if store.writes_allowed(conn) and store.schema_present(conn):
         for item in opinions:
@@ -808,8 +814,8 @@ def answer_with_agents(conn, backend, question, agents, *, vault_answer, sources
             )
         conn.commit()
     synthesis, dropped = filter_unsupported(
-        " ".join(str(result.get("synthesis") or "").split())[:900], allowed)
-    return {"opinions": opinions, "synthesis": synthesis[:700],
+        " ".join(str(result.get("synthesis") or "").split()), allowed)
+    return {"opinions": opinions, "synthesis": _trim(synthesis, 700),
             "removed_claims": removed + dropped}
 
 
@@ -823,6 +829,19 @@ _SPECIFIC = re.compile(r"(chine|chinois|chinoise|china|chinese|droit du travail|
 _PROPER = re.compile(r"(?<![\w'’-])([A-Z][a-zA-Z0-9À-ÿ'’&.-]+(?:\s+[A-Z][a-zA-Z0-9À-ÿ'’&.-]+)*)")
 _FIGURE = re.compile(r"\d[\d\s.,]*\s?(%|€|\$|k€|m€|euros?|dollars?)", re.I)
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
+_LIST_MARKER = re.compile(r"\d{1,2}[.)]")
+
+
+def _trim(text, max_chars):
+    """Coupe a la derniere fin de phrase avant max_chars, sinon au mot, avec « … »."""
+    text = str(text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    window = text[:max_chars]
+    end = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+    if end > max_chars // 2:
+        return window[:end + 1]
+    return window.rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
 
 
 def allowed_text(conn, payload_json):
@@ -851,7 +870,17 @@ def filter_unsupported(text, allowed):
     (texte filtre, phrases retirees).
     """
     kept, removed = [], []
-    for sentence in _SENTENCE.split(str(text or "").strip()):
+    # « 2. Faire X. 3. Faire Y. » : le numero reste attache a sa phrase (sinon une
+    # phrase retiree laisse un « 3. » orphelin en fin de reponse).
+    sentences = []
+    for piece in _SENTENCE.split(str(text or "").strip()):
+        if sentences and _LIST_MARKER.fullmatch(sentences[-1]):
+            sentences[-1] += " " + piece
+        else:
+            sentences.append(piece)
+    if sentences and _LIST_MARKER.fullmatch(sentences[-1]):
+        sentences.pop()
+    for sentence in sentences:
         if not sentence:
             continue
         reason = None

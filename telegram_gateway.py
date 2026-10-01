@@ -5,7 +5,9 @@ telegram_gateway.py - Life Gateway : Telegram, interface principale (PC + mobile
 Telegram est l'interface, pas le cerveau :
 - REACTIF : texte, vocal (transcrit localement), URL, reponse a un message, commande
   -> retrieval du Vault (vault_ask) -> Qwen local -> Agency Agents (modes A/B)
-  -> reponse ;
+  -> reponse ; une longue demande d'analyse passe en CONSULTATION (Vault en appui,
+  question complete au LLM via la tache complex du routeur) ; toute reponse longue
+  est decoupee en plusieurs messages, jamais tronquee ;
 - PROACTIF : suggestions du Mentor (mentor_delivery : budget, digest, pause,
   heures calmes) -> 💡 message court + boutons -> decision ecrite dans vault.db
   -> cockpit Notion mis a jour.
@@ -55,7 +57,8 @@ ANAPHORA_RE = re.compile(
 ACTIVE_CONTEXT_MINUTES = 60
 ADVICE_MARKERS = ("comment exploiter", "qu'en pense", "que pense", "ton avis", "conseil",
                   "strategie", "idee pour", "comment utiliser", "demande a", "demande au",
-                  "demande aux", "que ferait")
+                  "demande aux", "que ferait", "analyse", "compare", "propose", "recommande",
+                  "optimise", "optimiser")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS telegram_state (
@@ -256,8 +259,33 @@ class Gateway:
             and str(user_id) == self.allowed_user and str(chat_id) == self.allowed_chat
 
     def send(self, text, **kwargs):
-        result = self.client.send_message(self.chat_id, text, **kwargs)
-        return (result or {}).get("message_id")
+        ids = self.send_parts(text, **kwargs)
+        return ids[-1] if ids else None
+
+    def send_parts(self, text, *, buttons=None, reply_to=None, placeholder=None):
+        """
+        Envoie un texte de toute longueur : decoupe sans perte au-dela de la limite
+        Telegram (jamais de troncature silencieuse). Le premier morceau remplace le
+        message d'attente s'il y en a un ; les boutons vont sur le dernier morceau.
+        Retourne les message_id de tous les morceaux.
+        """
+        chunks = telegram_api.split_text(text)
+        ids = []
+        for index, chunk in enumerate(chunks):
+            last = index == len(chunks) - 1
+            if index == 0 and placeholder is not None:
+                try:
+                    self.client.edit_message(self.chat_id, placeholder, chunk,
+                                             buttons=buttons if last else None)
+                    ids.append(placeholder)
+                    continue
+                except telegram_api.TelegramError:
+                    pass
+            result = self.client.send_message(self.chat_id, chunk,
+                                              buttons=buttons if last else None,
+                                              reply_to=reply_to if index == 0 else None)
+            ids.append((result or {}).get("message_id"))
+        return ids
 
     # -------------------------------------------------------------- updates
     def handle_update(self, update):
@@ -531,8 +559,73 @@ class Gateway:
         return "project_linked"
 
     # -------------------------------------------------------------- questions
+    def project_consult_context(self, project_ids):
+        """Contexte projet compact transmis aux agents lors d'une consultation directe."""
+        if not project_ids:
+            return None
+        import mentor_project_profiles as profiles
+        import vault_ask
+
+        projects = []
+        for project_id in list(dict.fromkeys(project_ids))[:2]:
+            profile = profiles.get_profile(self.conn, project_id) or {}
+            view = vault_ask.project_view(self.conn, project_id) or {}
+            entity = view.get("entity") or {}
+            topics = []
+            for item in profile.get("core_topics") or []:
+                topic = item.get("topic") if isinstance(item, dict) else str(item)
+                if topic:
+                    topics.append(topic)
+            projects.append({
+                "id": project_id,
+                "name": profile.get("project_name") or entity.get("name")
+                        or _project_name(self.conn, project_id),
+                "description": profile.get("description"),
+                "core_topics": topics[:8],
+                "tasks": [
+                    {k: task.get(k) for k in ("id", "title", "status", "due_date")}
+                    for task in (view.get("tasks") or [])[:5]
+                ],
+                "suggestions": [
+                    {k: sug.get(k) for k in ("suggestion_id", "title", "status")}
+                    for sug in (view.get("suggestions") or [])[-5:]
+                ],
+            })
+        return {"projets": projects} if projects else None
+
+    def consult(self, question, *, reply_to=None, project_ids=()):
+        """
+        Longue demande d'analyse : le Vault fournit des preuves (requete compacte, sans
+        LLM), puis UN appel LLM recoit la question complete (tache complex du routeur).
+        Les agents ne sont ajoutes que s'ils sont nommes, via le paquet portable.
+        """
+        import vault_ask
+        import vault_orchestrator as orchestrator
+
+        placeholder = self.send("🧠 Analyse en cours…", reply_to=reply_to)
+        evidence = self._ask(question, llm="off")
+        # Meme paquet portable que ChatGPT / CLI : playbooks des agents NOMMES seulement.
+        packet = orchestrator.build_consultation_packet(question, auto_select=False)
+        playbooks = {p["name"]: p["playbook"] for p in packet["agent_playbooks"]}
+        agents = [{"name": a["name"], "role": a["description"],
+                   "playbook": playbooks.get(a["name"])} for a in packet["selected_agents"]]
+        router = self.backend if hasattr(self.backend, "complete_text") else None
+        result = vault_ask.consult(question, evidence=evidence, router=router, agents=agents,
+                                   project_context=self.project_consult_context(project_ids))
+        ids = self.send_parts(result["answer"], reply_to=reply_to, placeholder=placeholder)
+        source_ids = [s.get("source_id") for s in result["sources"] if s.get("source_id")]
+        for message_id in ids:
+            self.remember(message_id, "answer", question=question,
+                          agents=[a["name"] for a in agents], mode="consult",
+                          payload={"sources": source_ids, "anchor": None})
+        if source_ids:
+            self.set_active("sources", source_ids=source_ids, question=question)
+        self._publish_question(question, result["sources"])
+        return "answer:consult"
+
     def answer(self, question, *, anchor=None, adjustment=None, base=None, reply_to=None):
         import mentor_council as council
+        import vault_ask
 
         try:
             self.client.send_chat_action(self.chat_id)
@@ -541,13 +634,17 @@ class Gateway:
         if adjustment and base and not anchor:
             anchor = base.get("payload", {}).get("anchor")
         grounded = self.grounding(anchor) if anchor else None
+        mentioned_projects = council.projects_in_text(self.conn, question)
         project_ids = [grounded["project_id"]] if grounded and grounded.get("project_id") else []
+        for pid in mentioned_projects:
+            if pid not in project_ids:
+                project_ids.append(pid)
         if grounded:
-            for pid in council.projects_in_text(self.conn, question):
-                if pid not in project_ids:
-                    project_ids.append(pid)  # enrichit, sans remplacer la source active
             grounded["agent_context"]["projets_mentionnes"] = [
                 _project_name(self.conn, pid) for pid in project_ids]
+
+        if not adjustment and not grounded and vault_ask.is_consultation(question):
+            return self.consult(question, reply_to=reply_to, project_ids=project_ids)
 
         if adjustment:
             prior = base.get("agents") or []
@@ -568,7 +665,7 @@ class Gateway:
         else:
             wants_agents = any(marker in fold(question) for marker in ADVICE_MARKERS) \
                 or bool(council.agents_in_text(question)) \
-                or bool(council.projects_in_text(self.conn, question)) \
+                or bool(mentioned_projects) \
                 or grounded is not None
             mode, agents = council.select_for_question(
                 self.conn, question, project_ids=project_ids) if wants_agents else (None, [])
@@ -583,49 +680,71 @@ class Gateway:
                 mode, agents = None, []
             if result.get("route") == "project_view":
                 self._anchor_project(result["project_id"])
-        lines = [result["answer"]]
         panel = None
         placeholder = None
+        consultation_context = grounded["agent_context"] if grounded \
+            else self.project_consult_context(project_ids)
+        if agents and vault_ask.about_lis(question):
+            # Meme contexte LIS que la consultation (configuration reelle, sans reseau ni secret).
+            lis_context = vault_ask.lis_context(self.backend)
+            if consultation_context:
+                consultation_context = {**consultation_context, "lis_runtime": lis_context}
+            else:
+                consultation_context = {"lis_runtime": lis_context}
         if agents:
-            # Reponse immediate : l'analyse (LLM) peut prendre quelques dizaines de secondes.
             placeholder = self.send("🧠 Analyse en cours…", reply_to=reply_to)
-            ready = self.backend is not None and _backend_available(self.backend)
+            # Les longues demandes structurees meritent le chemin complexe : Gemini si configure,
+            # sinon OpenRouter. Les consultations courtes gardent la chaine standard/local.
+            consult_task = "complex" if len(question) > 500 or question.count("\n") >= 5 \
+                else "standard"
+            ready = self.backend is not None and _backend_available(self.backend, consult_task)
             if ready:
                 panel = council.answer_with_agents(
                     self.conn, self.backend, question, agents, vault_answer=result["answer"],
                     sources=result["sources"], mode=mode or "B",
                     session_id=f"telegram:{self.chat_id}",
-                    context=grounded["agent_context"] if grounded else None,
+                    context=consultation_context, task=consult_task,
                 )
+
+        if panel and panel["opinions"]:
+            # Priorite a la reponse utile : le dump complet du retrieval reste dans le Vault.
+            # Contrat V3 conserve : contexte actif, mode, agents consultes et pourquoi.
+            lines = [grounded["text"], ""] if grounded else []
+            lines.append("🧠 Analyse")
+            if panel.get("synthesis"):
+                lines.append(f"Synthèse : {panel['synthesis']}")
             lines.append("")
-            if panel and panel["opinions"]:
-                # Le moteur reel reste dans les journaux techniques, pas dans la reponse.
-                lines.append("🤝 Agents consultes (mode " + (mode or "B") + ") :")
-            else:
-                why = ("aucun moteur LLM disponible (Qwen local occupe ou injoignable, "
-                       "cloud non configure ou hors budget)") if not ready \
-                    else "reponse du moteur LLM inexploitable"
-                lines.append(f"🤝 Agents selectionnes mais non consultes : {why}.")
+            lines.append("🤝 Agents consultes (mode " + (mode or "B") + ") :")
             for agent in agents:
                 lines.append(f"• {agent['name']} — {agent['reason']}")
-            if panel and panel["opinions"]:
-                for opinion in panel["opinions"]:
-                    lines.append(f"\n{opinion['agent']} : {opinion['opinion']}")
-                if panel.get("synthesis"):
-                    lines.append(f"\nSynthèse : {panel['synthesis']}")
-        if placeholder is not None:
-            try:
-                self.client.edit_message(self.chat_id, placeholder, "\n".join(lines))
-                message_id = placeholder
-            except telegram_api.TelegramError:
-                message_id = self.send("\n".join(lines), reply_to=reply_to)
+            for opinion in panel["opinions"]:
+                lines.append(f"\n{opinion['agent']} : {opinion['opinion']}")
+            if result["sources"] and not grounded:
+                lines.append("")
+                lines.append("📚 Sources Vault retenues :")
+                for source in result["sources"][:3]:
+                    title = source.get("title") or f"source {source.get('source_id')}"
+                    url = source.get("url")
+                    lines.append(f"- {str(title)[:110]}" + (f" — {url}" if url else ""))
         else:
-            message_id = self.send("\n".join(lines), reply_to=reply_to)
+            lines = [result["answer"]]
+            if agents:
+                why = ("aucun moteur LLM disponible pour cette consultation "
+                       "(configuration, budget ou connectivite)") if not ready \
+                    else "reponse du moteur LLM inexploitable"
+                lines.append("")
+                lines.append(f"🤝 Agents selectionnes mais non consultes : {why}.")
+                for agent in agents:
+                    lines.append(f"• {agent['name']} — {agent['reason']}")
+
+        message_ids = self.send_parts("\n".join(lines), placeholder=placeholder,
+                                      reply_to=reply_to)
         source_ids = [s.get("source_id") for s in result["sources"] if s.get("source_id")]
         suggestion_id = grounded.get("suggestion_id") if grounded else None
-        self.remember(message_id, "answer", suggestion_id=suggestion_id, question=question,
-                      agents=[a["name"] for a in agents], mode=mode,
-                      payload={"sources": source_ids, "anchor": anchor})
+        for message_id in message_ids:
+            self.remember(message_id, "answer", suggestion_id=suggestion_id, question=question,
+                          agents=[a["name"] for a in agents], mode=mode,
+                          payload={"sources": source_ids, "anchor": anchor})
         if suggestion_id:
             self.set_active("suggestion", suggestion_id=suggestion_id,
                             project_id=grounded.get("project_id"))
@@ -721,7 +840,8 @@ class Gateway:
             return self.ask_fn(self.conn, question, llm=llm)
         import vault_ask
 
-        return vault_ask.ask(self.conn, question, mode="consult", llm=llm)
+        # Telegram gere deja la consultation Agency ; Ask reste un retrieval pur.
+        return vault_ask.ask(self.conn, question, mode="ask", llm=llm)
 
     def _publish_question(self, question, sources):
         import mentor_proactive
@@ -993,9 +1113,9 @@ class Gateway:
                 pass
 
 
-def _backend_available(backend):
+def _backend_available(backend, task="standard"):
     try:
-        return backend.available(task="standard")
+        return backend.available(task=task)
     except TypeError:
         return backend.available()
 
@@ -1145,6 +1265,13 @@ def run(gateway, *, once=False):
                 gateway.handle_update(update)
             except Exception as exc:  # noqa: BLE001 - une update ne tue pas la passerelle
                 log.error("update en erreur : %s", type(exc).__name__)
+                try:
+                    gateway.send(
+                        "⚠️ Je n'ai pas pu traiter ce message. L'erreur a ete journalisee. "
+                        "Tu peux reessayer ou envoyer /status."
+                    )
+                except Exception:  # noqa: BLE001 - Telegram peut etre la cause de l'erreur
+                    pass
             offset = update["update_id"] + 1
             gateway.set_state("offset", offset)
         try:

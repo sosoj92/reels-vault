@@ -1,5 +1,6 @@
 import _isolation  # noqa: F401  (EN PREMIER : isole le vrai Vault)
 
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,27 @@ NOON = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
 def real_ask(conn, question, llm="off"):
     # Retrieval reel du Vault (fixture), sans LLM : les tests ne dependent pas d'Ollama.
     return vault_ask.ask(conn, question, mode="consult", llm="off", semantic="off")
+
+
+class FakeRouter:
+    """Routeur LLM factice : enregistre la tache et le prompt recus."""
+
+    def __init__(self, reply="Reponse."):
+        self.reply = reply
+        self.calls = []
+        self.last = None
+
+    def available(self, *args, **kwargs):
+        return self.reply is not None
+
+    def complete_text(self, system, user, *, max_tokens=300, task="light", sensitivity=None,
+                      purpose=None):
+        self.calls.append({"system": system, "user": user, "task": task})
+        self.last = {"provider": "openrouter"} if self.reply else {"provider": None}
+        return self.reply
+
+    def describe(self):
+        return {"chains": {"complex": ["gemini", "openrouter"]}}
 
 
 def msg(text, *, user=USER, chat=CHAT, reply_to=None, message_id=1):
@@ -120,6 +142,99 @@ class ReactiveTests(GatewayCase):
         self.assertEqual(self.gw.handle_update(msg("Que sais-je sur le sourcing de profils data ?")),
                          "answer:ask")
         self.assertIn("Sourcing de profils data", self.last()["text"])
+
+    def test_long_text_question_is_accepted(self):
+        question = (
+            "Analyse mon Life Intelligence System et les solutions possibles. "
+            + "Je veux des options simples, peu couteuses et faciles a maintenir. " * 12
+            + "Concentre la recherche sur les tokens et leur consommation."
+        )
+        self.assertEqual(self.gw.handle_update(msg(question)), "answer:consult")
+        self.assertTrue(self.telegram.sent)
+        self.assertNotIn("500 characters", self.last()["text"])
+
+    def test_long_lis_question_is_a_consultation_on_the_complex_chain(self):
+        router = FakeRouter("1. Garde le retrieval deterministe. 2. Route les analyses en "
+                            "complex vers OpenRouter.")
+        self.gw.backend = router
+        question = (
+            "Analyse mon Life Intelligence System actuel et montre-moi toutes les solutions "
+            "concretes pour reduire ma consommation de tokens sans degrader la qualite. "
+            + "Regarde quand utiliser un LLM, le code classique, la taille du contexte. " * 6
+            + "Classe les recommandations par gain, difficulte et priorite.")
+        self.assertEqual(self.gw.handle_update(msg(question)), "answer:consult")
+        call = router.calls[0]
+        self.assertEqual(call["task"], "complex")
+        self.assertIn(" ".join(question.split()), call["user"])  # question complete
+        self.assertIn("ARCHITECTURE_LIS", call["user"])
+        answer = self.last()["text"]
+        self.assertTrue(answer.startswith("1. Garde le retrieval"))
+        self.assertNotIn("Tu avais notamment sauvegardé", answer)  # pas un dump du Vault
+        self.assertNotIn("Minimal Change Engineer", answer)
+        stored = self.gw.context_of(self.last()["message_id"])
+        self.assertEqual(stored["question"], " ".join(question.split()))
+        self.assertEqual(stored["mode"], "consult")
+
+    def test_long_answer_is_split_without_loss(self):
+        paragraphs = [f"Recommandation {i} : " + ("detail utile " * 60).strip() + f" FIN{i}."
+                      for i in range(12)]
+        router = FakeRouter("\n\n".join(paragraphs))
+        self.gw.backend = router
+        question = "Analyse et classe les recommandations pour mon systeme. " * 10
+        self.assertEqual(self.gw.handle_update(msg(question)), "answer:consult")
+        texts = [m["text"] for m in self.telegram.sent]
+        self.assertGreater(len(texts), 1)
+        for text in texts:
+            self.assertLessEqual(len(text.encode("utf-16-le")) // 2, telegram_api.MAX_TEXT)
+        joined = "\n\n".join(texts)
+        for paragraph in paragraphs:
+            self.assertIn(paragraph, joined)
+        self.assertFalse(any(t.endswith("…") for t in texts))
+        # Repondre a n'importe quel morceau retrouve la question.
+        for message in self.telegram.sent:
+            self.assertEqual(self.gw.context_of(message["message_id"])["kind"], "answer")
+
+    def test_consultation_receives_the_project_profile(self):
+        router = FakeRouter("Pour Nexdoor Talent : commence par le sourcing data.")
+        self.gw.backend = router
+        question = ("Analyse ce que je devrais prioriser pour Nexdoor Talent ce trimestre et "
+                    "classe les recommandations par gain, difficulte et priorite, en tenant "
+                    "compte des sources deja sauvegardees sur le sourcing de profils data.")
+        self.assertEqual(self.gw.handle_update(msg(question)), "answer:consult")
+        self.assertIn("CONTEXTE_PROJET", router.calls[0]["user"])
+        self.assertIn("Nexdoor Talent", router.calls[0]["user"])
+
+    def test_short_lis_advice_uses_the_panel_with_offline_lis_context(self):
+        class NoStatusBackend(fx.FakeBackend):
+            def status(self):
+                raise AssertionError("aucun appel reseau pour le contexte LIS")
+
+        self.gw.backend = NoStatusBackend()
+        result = self.gw.handle_update(msg("Analyse le routage LLM de mon Life Intelligence "
+                                           "System"))
+        self.assertTrue(result.startswith("answer:"))
+        payload = json.loads(self.gw.backend.prompts[-1][1])
+        self.assertIn("composants", payload["contexte_actif"]["lis_runtime"])
+        answer = self.last()["text"]
+        self.assertTrue(answer.startswith("🧠 Analyse"))  # synthese d'abord, pas le dump Vault
+        self.assertIn("Synthese des specialistes", answer)
+
+    def test_consultation_without_llm_still_answers_from_the_vault(self):
+        self.gw.backend = FakeRouter(reply=None)
+        question = ("Analyse ce que j'ai sauvegarde sur le sourcing de profils data et classe "
+                    "les recommandations par priorite pour mon recrutement cette annee, avec "
+                    "les options les plus simples a mettre en place en premier.")
+        self.assertEqual(self.gw.handle_update(msg(question)), "answer:consult")
+        self.assertIn("Analyse complète indisponible", self.last()["text"])
+        self.assertIn("Sourcing de profils data", self.last()["text"])
+
+    def test_split_text_keeps_every_character_but_cut_whitespace(self):
+        text = "\n\n".join(("mot " * 700).strip() + "💡" for _ in range(3)) + "x" * 9000
+        chunks = telegram_api.split_text(text, limit=4000)
+        self.assertTrue(all(len(c.encode("utf-16-le")) // 2 <= 4000 for c in chunks))
+        self.assertEqual("".join(chunks).replace(" ", "").replace("\n", ""),
+                         text.replace(" ", "").replace("\n", ""))
+        self.assertEqual(telegram_api.split_text("court"), ["court"])
 
     def test_voice_is_transcribed_then_answered(self):
         self.telegram.files["voice-1"] = "Que sais-je sur le sourcing de profils data ?".encode()
@@ -309,6 +424,18 @@ class RestartTests(GatewayCase):
         restarted = self.make_gateway(conn=self.conn)
         tg.run(restarted, once=True)  # les updates deja traitees ne sont pas rejouees
         self.assertEqual(len(self.telegram.sent), sent)
+
+    def test_processing_error_is_reported_in_telegram(self):
+        def broken(_conn, _question, llm="off"):
+            raise RuntimeError("boom")
+
+        self.gw.ask_fn = broken
+        self.telegram.updates = [msg("question qui plante", message_id=21)]
+        tg.run(self.gw, once=True)
+        self.assertEqual(self.gw.state("offset"), "22")
+        self.assertTrue(any(
+            "pas pu traiter ce message" in item["text"] for item in self.telegram.sent
+        ))
 
 
 class SetupTests(unittest.TestCase):

@@ -28,6 +28,7 @@ import urllib.request
 from pathlib import Path
 
 import vault_intelligence_context as context_layer
+from vault_security_gate import UNTRUSTED_RULE, wrap_untrusted
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "vault.db"
@@ -43,6 +44,7 @@ DEFAULT_LLM_TIMEOUT = float(os.environ.get("VAULT_ASK_LLM_TIMEOUT", "25"))
 
 MAX_SOURCES = 5
 MIN_RELATIVE_SCORE = 0.35
+MAX_RETRIEVAL_QUERY_CHARS = 500
 
 # Domaines ou la prudence epistemique est obligatoire.
 _SENSITIVE_ROUTES = {"research_evidence", "health", "finance", "legal"}
@@ -163,8 +165,8 @@ def _topic(question):
 def _is_sensitive(question, sources, routes):
     if {r.get("route") for r in routes} & _SENSITIVE_ROUTES:
         return True
-    terms = {item["term"] for item in context_layer.query_terms(question)}
-    if terms & _HEALTH_WORDS:
+    # Question complete (pas la requete de retrieval compactee) : aucun mot sensible perdu.
+    if set(context_layer._fold(question).split()) & _HEALTH_WORDS:
         return True
     return any(
         context_layer._fold(s.get("category")) in _HEALTH_CATEGORIES
@@ -203,7 +205,7 @@ _ASSESSMENT_LABELS = {
 
 def render_answer(question, sources, *, mentor=None, sensitive=False,
                   capabilities=None, agents=None, mode="ask", related=None,
-                  assessments=None):
+                  assessments=None, term_question=None):
     """
     Reponse deterministe : uniquement des faits presents dans le Vault.
 
@@ -251,7 +253,7 @@ def render_answer(question, sources, *, mentor=None, sensitive=False,
     # "Pourquoi c'est utile" : uniquement des signaux deja calcules.
     reasons = []
     origins = []
-    for item in context_layer.query_terms(question):
+    for item in context_layer.query_terms(term_question or question):
         if item["term"] == item["origin"] and item["origin"] not in origins:
             origins.append(item["origin"])
     matched_origins = [
@@ -399,8 +401,9 @@ def _synthesis_prompt(question, sources, agents):
     blocks = []
     for index, source in enumerate(sources[:4], start=1):
         blocks.append(
-            f"[{index}] {_cut(_clean_title(source.get('title')), 90)} — "
-            f"{_cut(_best_excerpt(source), 240)}"
+            f"[{index}] " + wrap_untrusted(
+                f"{_cut(_clean_title(source.get('title')), 90)} — "
+                f"{_cut(_best_excerpt(source), 240)}", ref=index)
         )
     lens = f"Angles : {', '.join(agents)}.\n" if agents else ""
     system = (
@@ -408,7 +411,7 @@ def _synthesis_prompt(question, sources, agents):
         "en 2 ou 3 phrases "
         "maximum, uniquement à partir des SOURCES. N'invente aucun fait, "
         "chiffre ou nom absent des sources. Mentionne les sources par leur "
-        "numéro [n]. Si les sources ne répondent pas, dis-le."
+        "numéro [n]. Si les sources ne répondent pas, dis-le. " + UNTRUSTED_RULE
     )
     user = f"Question : {question}\n{lens}SOURCES :\n" + "\n".join(blocks)
     return system, user
@@ -448,6 +451,8 @@ def _ollama_chat(system, user, num_predict=130, timeout=120):
 def _complete_sentences(text):
     """Retire une fin de phrase coupee par la limite de tokens."""
     text = text.strip()
+    # « … 2. Faire X. 3. » : un numero de liste orphelin n'est pas une fin de phrase.
+    text = re.sub(r"(?:^|(?<=[.!?:;]))\s*\d{1,2}[.)]$", "", text).rstrip()
     if not text or text[-1] in ".!?»)]":
         return text
     cut = max(text.rfind(mark) for mark in (". ", "! ", "? ", "] "))
@@ -637,6 +642,77 @@ def clean_question(question):
     return text or " ".join(str(question or "").split())
 
 
+# Mots de consigne d'un long prompt : ils decrivent la forme de la reponse
+# attendue (« analyse », « classe par priorite »...), pas le sujet a retrouver.
+# Utilises uniquement pour compacter les longs messages (les questions courtes
+# gardent le comportement historique). Aucun mot de sante ici : la sensibilite
+# est de toute facon evaluee sur la question complete.
+_PROMPT_WORDS = {
+    "analyse", "analyser", "analyses", "audit", "auditer", "actuel", "actuelle",
+    "actuels", "actuelles", "concret", "concrete", "concretes", "concrets",
+    "maximum", "minimum", "degrader", "qualite", "notamment", "regardes",
+    "utiliser", "utilise", "utilises", "non", "oui", "peuvent", "pouvoir", "etre",
+    "faits", "faite", "faites", "classique", "classiques", "envoye", "envoyes",
+    "envoyer", "eviter", "inutile", "inutilement", "meme", "memes", "selon", "peu",
+    "autre", "autres", "potentiel", "potentielle", "priorite", "priorites",
+    "prioriser", "priorise", "prends", "prendre", "compte", "privilegie",
+    "privilegier", "simple", "simples", "avant", "apres", "nouveau", "nouveaux",
+    "nouvelle", "nouvelles", "ajout", "brique", "briques", "recommandation",
+    "recommandations", "recommande", "classe", "classer", "classement", "gain",
+    "gains", "difficulte", "difficultes", "implementation", "implementer",
+    "detail", "detaille", "detaillee", "detailles", "propose", "proposer",
+    "proposition", "propositions", "montre", "moi", "quand", "lesquels",
+    "system", "systeme", "systemes", "lis", "pertinent", "pertinente",
+    "pertinents", "pertinentes", "possible", "possibles", "option", "options",
+    "alternative", "alternatives", "contrainte", "contraintes", "fin",
+    "concentre", "concentrer", "puissant", "puissants", "puissante", "couteux", "cher",
+    "tache", "taches", "taille", "renvoyer", "facile", "faciles", "rapide",
+    "besoin", "souhaite", "ensuite", "enfin", "egalement", "ainsi", "afin",
+    "donc", "car", "mais", "etape", "etapes", "ordre", "point", "points",
+    "exemple", "exemples", "cible", "ciblee", "maniere", "facon", "vraie",
+}
+MAX_RETRIEVAL_TERMS = 16
+
+
+def compact_retrieval_query(question, max_chars=MAX_RETRIEVAL_QUERY_CHARS,
+                            max_terms=MAX_RETRIEVAL_TERMS):
+    """
+    Reduit un long message utilisateur en requete de retrieval bornee.
+
+    Le message original reste intact pour le raisonnement. Seule la recherche
+    dans le Vault recoit cette version compacte : mots-sujets uniques (sans mots
+    de rappel ni de consigne), plafonnes en nombre ; les trois quarts viennent du
+    debut, le reste de la fin pour ne pas perdre un sujet cite tard. Trop de
+    termes diluent la couverture et font remonter des sources hors sujet.
+    """
+    cleaned = clean_question(question)
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    stopwords = context_layer._STOPWORDS | context_layer._RECALL_STOPWORDS | _PROMPT_WORDS
+    stems = set()
+    terms = []
+    for token in context_layer._fold(cleaned).split():
+        if len(token) < 2 or token in stopwords or token in context_layer._GENERIC_TOPIC_WORDS:
+            continue
+        if token.isdigit() and len(token) < 3:
+            continue
+        stem = context_layer._stem(token)
+        if stem in stems:
+            continue
+        stems.add(stem)
+        terms.append(token)
+    if not terms:
+        return cleaned[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:.") or cleaned[:max_chars]
+
+    if len(terms) > max_terms:
+        tail = max_terms // 4
+        terms = terms[:max_terms - tail] + terms[-tail:]
+    while len(" ".join(terms)) > max_chars and len(terms) > 1:
+        terms.pop(len(terms) // 2)  # retire au milieu : garde le debut et la fin
+    return " ".join(terms)[:max_chars]
+
+
 def project_intent(conn, question):
     """
     Intention describe_project : « que sais-tu de Nexdoor Talent ? », « ou en est X ? »,
@@ -796,6 +872,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
     question = " ".join(str(question or "").split())
     if not question:
         raise ValueError("question is required")
+    retrieval_question = compact_retrieval_query(question)
 
     # Question sur un projet connu : vue projet construite depuis le Vault.
     project_id = project_intent(conn, question)
@@ -805,7 +882,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
             return described
 
     pack = context_layer.build_context_pack(
-        conn, clean_question(question), direct_source_limit=max(max_sources * 2, 8),
+        conn, retrieval_question, direct_source_limit=max(max_sources * 2, 8),
         semantic=semantic, semantic_backend=semantic_backend,
     )
     lexical = [
@@ -837,6 +914,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
         mode=mode,
         related=related,
         assessments=assessments,
+        term_question=retrieval_question,
     )
 
     synthesis = None
@@ -869,6 +947,7 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
 
     return {
         "question": question,
+        "retrieval_query": retrieval_question,
         "mode": mode,
         "answer": answer,
         "sources": [
@@ -876,8 +955,9 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
                 key: source.get(key)
                 for key in (
                     "source_id", "content_id", "title", "url", "platform",
-                    "author", "category", "snippet", "matched_tokens",
-                    "matched_fields", "score", "retrieval",
+                    "author", "category", "snippet", "snippet_field",
+                    "transcript_excerpt", "matched_tokens", "matched_fields",
+                    "score", "retrieval",
                 )
             }
             for source in sources
@@ -905,6 +985,193 @@ def ask(conn, question, *, mode="ask", agent=None, llm="auto",
             "total": round((time.perf_counter() - started) * 1000),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Consultation : demande d'analyse longue (Telegram)
+#
+# RETRIEVAL et RAISONNEMENT sont separes : le Vault est interroge avec une
+# requete compacte (ask), le LLM recoit la question COMPLETE, les sources
+# retrouvees comme simples preuves d'appui et, si la question porte sur le LIS
+# lui-meme, un resume de son architecture et de sa configuration LLM reelle.
+# ---------------------------------------------------------------------------
+
+CONSULT_MIN_CHARS = 200
+CONSULT_MAX_SOURCES = 4
+CONSULT_MAX_TOKENS = 4000
+_TRUNCATED = {"length", "max_tokens"}
+_CONSULT_RE = re.compile(
+    r"(?<![a-z])(analyse|analyser|audite|auditer|compare|comparer|evalue|evaluer|"
+    r"recommandations?|priorise|prioriser|classe les|plan d action|quelles solutions|"
+    r"optimiser|ameliorer)(?![a-z])")
+_LIS_RE = re.compile(
+    r"(?<![a-z0-9])(life intelligence|lis|llm router|openrouter|qwen|gemini|ollama|"
+    r"mon systeme|ce systeme)(?![a-z0-9])")
+
+# Architecture du LIS (resume statique, sans code ni secret). La configuration LLM
+# effective est ajoutee a part par llm_router.describe().
+LIS_COMPONENTS = {
+    "vault.db": "SQLite, source de verite (contenus, sources, entites, claims, "
+                "relations, actions, suggestions du Mentor).",
+    "vault_ask": "retrieval-first : recherche lexicale ponderee (idf, champs, synonymes "
+                 "FR/EN) + semantique locale optionnelle (embeddings e5) ; reponse "
+                 "deterministe citee sans LLM ; synthese courte optionnelle (tache light, "
+                 "180 tokens) ; demandes longues : requete de retrieval compactee puis "
+                 "consultation (tache complex).",
+    "vault_intelligence_context": "paquet de contexte borne construit sans LLM.",
+    "llm_router": "point d'appel LLM unique : taches deterministic / light / standard / "
+                  "complex ; sensibilite (secret jamais envoye, sensitive local uniquement, "
+                  "personal local sauf option) ; budgets, coupe-circuit, journal "
+                  "logs/llm_usage.db (tokens, cout). Aucun cache de reponses LLM.",
+    "mentor": "mentor_proactive (candidats deterministes) -> mentor_worker (tri, tache "
+              "light, 120 tokens) -> mentor_council (hypothese + avis d'agents en JSON, "
+              "tache standard, 220 a 520 tokens) -> suggestions a valider.",
+    "agents": "playbooks Agency Agents (markdown) choisis par regles de mots-cles "
+              "(vault_orchestrator, 3 max, sans LLM) ; en Telegram, avis via une tache "
+              "standard (380 tokens).",
+    "ingestion": "vault_ingestion : classification des notes / URL / fichiers (tache light, "
+                 "JSON, 260 tokens) ; secrets rejetes avant tout LLM.",
+    "telegram": "interface (polling, whitelist, vocal transcrit localement) ; aucune "
+                "action externe sans clic.",
+    "notion": "cockpit : projection des suggestions et taches, jamais source de verite.",
+}
+
+
+def is_consultation(question):
+    """Longue demande d'analyse (et non simple rappel) : raisonnement complet requis."""
+    text = " ".join(str(question or "").split())
+    if len(text) > MAX_RETRIEVAL_QUERY_CHARS:
+        return True
+    return len(text) >= CONSULT_MIN_CHARS and bool(
+        _CONSULT_RE.search(context_layer._fold(text)))
+
+
+def about_lis(question):
+    return bool(_LIS_RE.search(context_layer._fold(question)))
+
+
+def lis_context(router=None):
+    """Architecture + configuration LLM reelle (chaines, modeles, fournisseurs configures)."""
+    context = {"composants": LIS_COMPONENTS}
+    if router is not None and hasattr(router, "describe"):
+        try:
+            context["configuration_llm"] = router.describe()
+        except Exception:  # noqa: BLE001 - contexte facultatif
+            pass
+    return context
+
+
+def _cloud_safe(sources):
+    """Titre + extrait public seulement ; sans provenance connue, aucun extrait."""
+    safe = []
+    for source in public_only(sources):
+        snippet = source.get("snippet") if source.get("snippet_field") else ""
+        safe.append({"title": _cut(_clean_title(source.get("title")), 90),
+                     "extrait": _cut(_clean_text(snippet), 240)})
+    return safe
+
+
+def _consult_prompt(question, sources, lis=None, agents=(), project=None):
+    system = (
+        "Tu es Life Intelligence, le conseiller personnel de Rosy. Francais, tutoiement. "
+        "Reponds directement et completement a la DEMANDE, en respectant la structure "
+        "qu'elle demande (classements, priorites...), sans preambule. Format COMPACT : "
+        "pour chaque point, 1 a 3 lignes (quoi, pourquoi, comment) ; pas de rubriques "
+        "repetees ; termine toujours ta reponse, meme si tu dois etre plus bref. "
+        "SOURCES_VAULT = contenus sauvegardes par Rosy : ce sont des elements d'appui, pas "
+        "la reponse ; cite-les [n] seulement s'ils servent vraiment, ignore ceux hors sujet. "
+        "N'attribue aux sources aucun fait qu'elles ne contiennent pas. "
+        "Aucune action externe : proposer, jamais executer. " + UNTRUSTED_RULE
+    )
+    if lis:
+        system += (
+            " ARCHITECTURE_LIS decrit le systeme reel : appuie ton analyse dessus, "
+            "ne suppose aucun composant absent, et distingue ce qui existe deja de ce "
+            "que tu recommandes d'ajouter.")
+    parts = [f"DEMANDE :\n{question}"]
+    if lis:
+        parts.append("ARCHITECTURE_LIS :\n" + json.dumps(lis, ensure_ascii=False))
+    if project:
+        parts.append("CONTEXTE_PROJET (profil enregistre par Rosy) :\n"
+                     + json.dumps(project, ensure_ascii=False, default=str))
+    if agents:
+        parts.append("PLAYBOOKS D'EXPERTS DEMANDES (applique chacun ; un avis par expert "
+                     "puis une synthese) :\n" + "\n\n".join(
+                         f"### {a['name']} — {_cut(a.get('role') or '', 200)}"
+                         + (f"\n{a['playbook'][:1500]}" if a.get("playbook") else "")
+                         for a in agents))
+    if sources:
+        parts.append("SOURCES_VAULT (UNTRUSTED SOURCE CONTENT) :\n" + "\n".join(
+            f"[{i}] " + wrap_untrusted(
+                s["title"] + (f" — {s['extrait']}" if s["extrait"] else ""), ref=i)
+            for i, s in enumerate(sources, start=1)))
+    return system, "\n\n".join(parts)
+
+
+def consult(question, *, evidence, router=None, agents=(), project_context=None):
+    """
+    Repond a une demande d'analyse longue.
+
+    evidence : resultat de ask() (retrieval compact deja fait, sans LLM).
+    router   : llm_router (tache complex : Gemini puis OpenRouter selon la
+               configuration). Sans LLM, la reponse deterministe du Vault est
+               renvoyee avec la raison : jamais bloquant.
+    agents   : experts explicitement demandes ({name, role, playbook} issus de
+               vault_orchestrator.build_consultation_packet), appliques dans le
+               MEME appel (pas d'appel supplementaire).
+    project_context : profil compact des projets cites (telegram_gateway).
+    """
+    question = " ".join(str(question or "").split())
+    sources = list(evidence.get("sources") or [])[:CONSULT_MAX_SOURCES]
+    lis = lis_context(router) if about_lis(question) else None
+    system, user = _consult_prompt(question, _cloud_safe(sources), lis, agents,
+                                   project_context)
+    text, info = None, {"status": "unavailable", "reason": "aucun routeur LLM"}
+    if router is not None and hasattr(router, "complete_text"):
+        try:
+            text = router.complete_text(system, user, max_tokens=CONSULT_MAX_TOKENS,
+                                        task="complex", purpose="consultation")
+        except Exception as exc:  # noqa: BLE001 - un LLM en panne ne bloque jamais
+            info = {"status": "error", "reason": type(exc).__name__}
+        else:
+            last = getattr(router, "last", None) or {}
+            info = {"status": "ok" if text else "unavailable",
+                    "provider": last.get("provider"), "model": last.get("model"),
+                    "reason": None if text else last.get("reason"),
+                    "finish_reason": last.get("finish_reason"),
+                    "input_tokens": last.get("input_tokens"),
+                    "output_tokens": last.get("output_tokens"),
+                    "cost_usd": last.get("cost_usd"),
+                    "usage_estimated": last.get("usage_estimated")}
+    text = str(text or "").strip()
+    truncated = bool(text) and str(info.get("finish_reason") or "").lower() in _TRUNCATED
+    if truncated:
+        # Limite de sortie du modele atteinte : on retire la ligne inachevee et on le DIT.
+        text = text.rsplit("\n", 1)[0].rstrip() if "\n" in text else text
+        text += ("\n\n⚠️ Réponse interrompue par la limite de longueur du modèle : "
+                 "la suite n'a pas été générée ; pose une question plus ciblée sur la partie "
+                 "manquante.")
+    info["truncated"] = truncated
+    if text:
+        answer = text
+        cited = sorted({int(n) for n in re.findall(r"\[(\d+)\]", text)
+                        if 1 <= int(n) <= len(sources)})
+        if cited:
+            answer += "\n\n📚 Sources du Vault citées :"
+            for n in cited:
+                source = sources[n - 1]
+                answer += f"\n[{n}] {_clean_title(source.get('title'))}"
+                if source.get("url"):
+                    answer += f" — {source['url']}"
+        used = [sources[n - 1] for n in cited]
+    else:
+        answer = ("⚠️ Analyse complète indisponible pour l'instant (aucun moteur LLM adapté "
+                  "disponible). Voici ce que ton Vault contient de proche :\n\n"
+                  + evidence.get("answer", ""))
+        used = sources
+    return {"question": question, "mode": "consultation", "answer": answer,
+            "sources": used, "evidence_sources": sources, "lis_context": bool(lis),
+            "retrieval_query": evidence.get("retrieval_query"), "llm": info}
 
 
 def main():
