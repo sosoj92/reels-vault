@@ -1,34 +1,14 @@
-# Transformer ses vidéos Instagram sauvegardées en base de données interrogeable
+# Reels Vault : retrouver ce que tu as gardé dans tes Reels Instagram
 
-*Tuto complet, testé sur Windows 11. Zéro connaissance en code requise. Coût : 0 € si tu as déjà un abonnement Claude.*
+**Ce projet télécharge tes Reels Instagram sauvegardés, les transcrit et les résume dans une base de fiches
+texte. Ensuite tu demandes en français normal, par exemple *« je pars au Japon, sors-moi tout ce que j'ai
+gardé »*, et tu obtiens la liste avec les adresses, les horaires et les prix.**
 
----
-
-## Le problème
-
-Tu as des centaines de Reels sauvegardés. Des restos, des adresses, des astuces, des idées de voyage. Et tu ne retrouves jamais rien, parce que tout est enfermé dans des vidéos qu'aucune recherche ne peut lire.
-
-À la fin de ce tuto, tu pourras demander en langage normal : *« je pars au Japon, sors-moi tout ce que j'ai gardé »* — et obtenir la liste, avec les adresses, les horaires et les prix.
-
-Le principe : chaque vidéo est **téléchargée, transcrite et résumée**, puis rangée dans une base de fichiers texte. Et une fois le système en place, tu partages un Reel depuis ton téléphone et il s'ajoute tout seul pendant la nuit.
-
----
-
-## Ce que ça coûte vraiment
-
-Le montage d'origine (celui qui a tourné sur X) repose sur un agent nommé Hermes, branché à une clé API facturée au token, sur une machine allumée en permanence.
-
-La version de ce tuto ne coûte **rien de plus** qu'un abonnement Claude Pro, parce qu'elle remplace chaque brique payante par un équivalent gratuit :
-
-| Le montage d'origine | Ce qu'on utilise à la place | Coût |
-|---|---|---|
-| Hermes + clé API | **Claude Cowork** (inclus dans Pro) | 0 € |
-| Agent iMessage 24h/24 | **Un raccourci iPhone + une tâche planifiée** | 0 € |
-| Serveur allumé en permanence | **Ton PC, quand il est allumé** | 0 € |
-| Transcription par API | **Whisper en local** | 0 € |
-| Téléchargement des vidéos | **yt-dlp** | 0 € |
-
-**La seule vraie limite** : les quotas d'usage de Claude. Compter quelques centaines de vidéos par session confortablement. Traiter 10 000 vidéos d'un coup n'est pas réaliste sur un abonnement Pro — mais 300 fiches bien rangées servent davantage que 10 000 en vrac.
+- Tu partages un Reel depuis ton iPhone et il s'ajoute tout seul pendant la nuit.
+- Tout tourne sur ton PC Windows : transcription Whisper en local, téléchargement avec yt-dlp.
+- Coût : **0 € de plus** si tu as déjà Claude Pro (Claude Cowork fait le tri). La seule limite, ce sont les
+  quotas de Claude : quelques centaines de vidéos par session, pas 10 000 d'un coup.
+- Zéro connaissance en code requise. Testé sur Windows 11.
 
 ---
 
